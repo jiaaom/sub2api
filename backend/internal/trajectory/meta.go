@@ -18,9 +18,12 @@ const (
 	OutcomeSuccess   = "success"    // 2xx 且响应读到 EOF
 	OutcomeHTTPError = "http_error" // 非 2xx，响应读完
 	OutcomeError     = "error"      // 传输层错误（Do 返回 error 或读取出错）
-	OutcomeAborted   = "aborted"    // 响应未读完即被关闭
-	OutcomeAbandoned = "abandoned"  // 一直未关闭，被强制落定
-	OutcomePending   = "pending"    // 仅出现在 spool 中
+	OutcomeAborted   = "aborted"    // 请求已取消（客户端断开等）时响应未读完即被关闭
+	// OutcomeClosedEarly 请求未取消、调用方在 EOF 之前主动关闭响应：常见于读到终止事件（如 response.completed）
+	// 后不再读取的 SSE 消费方，数据视为完整。
+	OutcomeClosedEarly = "closed_early"
+	OutcomeAbandoned   = "abandoned" // 一直未关闭，被强制落定
+	OutcomePending     = "pending"   // 仅出现在 spool 中
 )
 
 // Meta 对应 raw/.../<exchange_id>/meta.json。字段含义见 design.md §2。

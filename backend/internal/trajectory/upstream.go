@@ -145,8 +145,14 @@ func (t *teeBody) Read(p []byte) (int, error) {
 }
 
 func (t *teeBody) Close() error {
+	outcome := OutcomeClosedEarly
+	if t.status < 200 || t.status >= 300 {
+		outcome = OutcomeHTTPError
+	} else if ctx := t.att.ex.clientCtx; ctx != nil && ctx.Err() != nil {
+		outcome = OutcomeAborted
+	}
 	err := t.rc.Close()
-	t.end(OutcomeAborted, nil)
+	t.end(outcome, nil)
 	return err
 }
 

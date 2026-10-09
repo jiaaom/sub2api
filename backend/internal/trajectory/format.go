@@ -24,8 +24,8 @@ const formatDoc = "# sub2api trajectory recording — on-disk format v1\n" + `
 
 - status：complete | incomplete（客户端断开、上游中断、崩溃恢复、强制落定）| error（handler panic）
 - client.protocol / attempts[].upstream_protocol：anthropic_messages | openai_chat | openai_responses | gemini | …
-- attempts[].outcome：success | http_error | error | aborted | abandoned
-- final_attempt：最后一个 success 的 attempt 下标
+- attempts[].outcome：success（读到 EOF）| closed_early（未取消、调用方读到终止事件后主动关闭，数据完整）| http_error | error | aborted（请求已取消时被关闭）| abandoned
+- final_attempt：最后一个 success / closed_early 的 attempt 下标
 - usage：按上游原始口径（Anthropic input 不含缓存命中；OpenAI input 含缓存命中）
 - truncated：任一 body 超过 SUB2API_TRAJECTORY_MAX_BODY_BYTES 被截断
 `

@@ -112,6 +112,28 @@ func TestWrapHTTPUpstreamStreamsAndRecordsTiming(t *testing.T) {
 	require.Equal(t, OutcomeSuccess, m.Attempts[0].Outcome)
 }
 
+func TestWrapHTTPUpstreamEarlyCloseWithoutCancelIsComplete(t *testing.T) {
+	rec := newTestRecorder(t, enabledScopes())
+	fake := &fakeUpstream{respond: func(*http.Request) (*http.Response, error) {
+		h := http.Header{"Content-Type": {"text/event-stream"}}
+		return &http.Response{StatusCode: 200, Header: h, Body: &slowBody{chunks: []string{"data: done\n\n", "data: trailing\n\n"}}}, nil
+	}}
+	up := WrapHTTPUpstream(fake, rec)
+	_, ctx, finish := startExchange(t, rec)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://u.example/v1/responses", strings.NewReader("{}"))
+	resp, err := up.Do(req, "", 1, 1)
+	require.NoError(t, err)
+	buf := make([]byte, 64)
+	_, _ = resp.Body.Read(buf) // 读到终止事件后主动关闭
+	require.NoError(t, resp.Body.Close())
+	finish()
+
+	_, m := onlyExchange(t, rec)
+	require.Equal(t, OutcomeClosedEarly, m.Attempts[0].Outcome)
+	require.Equal(t, StatusComplete, m.Status)
+	require.NotNil(t, m.FinalAttempt)
+}
+
 func TestWrapHTTPUpstreamEarlyCloseMarksAborted(t *testing.T) {
 	rec := newTestRecorder(t, enabledScopes())
 	fake := &fakeUpstream{respond: func(*http.Request) (*http.Response, error) {
@@ -119,12 +141,15 @@ func TestWrapHTTPUpstreamEarlyCloseMarksAborted(t *testing.T) {
 		return &http.Response{StatusCode: 200, Header: h, Body: &slowBody{chunks: []string{"data: a\n\n", "data: b\n\n"}}}, nil
 	}}
 	up := WrapHTTPUpstream(fake, rec)
-	_, ctx, finish := startExchange(t, rec)
+	ex, ctx, finish := startExchange(t, rec)
+	clientCtx, cancel := context.WithCancel(context.Background())
+	ex.clientCtx = clientCtx
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://u.example/v1/messages", strings.NewReader("{}"))
 	resp, err := up.Do(req, "", 1, 1)
 	require.NoError(t, err)
 	buf := make([]byte, 64)
 	_, _ = resp.Body.Read(buf)
+	cancel() // 客户端断开
 	require.NoError(t, resp.Body.Close())
 	finish()
 

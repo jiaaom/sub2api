@@ -2,6 +2,7 @@ package trajectory
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"net/http"
@@ -22,11 +23,14 @@ import (
 // middleware 结束）调用 Recording() 决定 → middleware 结束并且所有 attempt 关闭后异步落定。
 // 决定之前 A 只暂存在内存中；决定不录则什么都不落盘。
 type Exchange struct {
-	rec     *Recorder
-	ginCtx  *gin.Context // 仅在 decideOnce 内、且 middleware 返回前使用
-	skip    bool
-	id      string
-	started time.Time
+	rec    *Recorder
+	ginCtx *gin.Context // 仅在 decideOnce 内、且 middleware 返回前使用
+	// clientCtx 客户端请求的原始 context：客户端断开时被取消，用于区分 closed_early 与 aborted。
+	// 不能用上游请求自己的 ctx——部分 service 读到终止事件后会先 cancel 上游 ctx 再关闭 body。
+	clientCtx context.Context
+	skip      bool
+	id        string
+	started   time.Time
 
 	clientReq          []byte
 	clientReqTruncated bool
@@ -54,12 +58,13 @@ func (r *Recorder) newExchange(c *gin.Context, skip bool) *Exchange {
 		id = uuid.New()
 	}
 	ex := &Exchange{
-		rec:     r,
-		ginCtx:  c,
-		skip:    skip,
-		id:      id.String(),
-		started: now,
-		refs:    1, // middleware 持有
+		rec:       r,
+		ginCtx:    c,
+		clientCtx: c.Request.Context(),
+		skip:      skip,
+		id:        id.String(),
+		started:   now,
+		refs:      1, // middleware 持有
 	}
 	req := c.Request
 	ex.meta = Meta{
@@ -296,7 +301,7 @@ func (ex *Exchange) finalize() {
 				m.Status = StatusIncomplete
 			}
 		}
-		if m.Attempts[i].Outcome == OutcomeSuccess {
+		if o := m.Attempts[i].Outcome; o == OutcomeSuccess || o == OutcomeClosedEarly {
 			idx := i
 			m.FinalAttempt = &idx
 		}
