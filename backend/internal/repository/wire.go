@@ -160,7 +160,7 @@ var ProviderSet = wire.NewSet(
 	NewProxyExitInfoProber,
 	NewClaudeUsageFetcher,
 	NewClaudeOAuthClient,
-	NewHTTPUpstream,
+	ProvideHTTPUpstream, // trajectory: NewHTTPUpstream + 录制装饰器
 	NewOpenAIOAuthClient,
 	NewOpenAIReferralClient,
 	NewGrokOAuthClient,
