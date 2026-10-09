@@ -3,9 +3,11 @@ package trajectory
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -46,7 +48,8 @@ type Exchange struct {
 	released    bool
 	finalized   bool
 	openBodies  map[int]*teeBody
-	clientResp  *bodyFile
+	io          sync.WaitGroup // 后台磁盘写入（A、B、初始 meta）
+	clientResp  *asyncSink
 	clientRespN string // 客户端响应文件名（相对 exchange 目录）
 	panicked    bool
 }
@@ -156,20 +159,16 @@ func (ex *Exchange) decide() {
 	ex.rec.stats.exchangesStarted.Add(1)
 }
 
+// openLocked 填充 meta 并把 A 与初始 meta.json 交给后台写入（不阻塞发往上游的请求）。
 func (ex *Exchange) openLocked() error {
 	m := &ex.meta
-	m.Client.Stream = requestWantsStream(m.Client.Protocol, m.Client.Path, m.Client.Query, ex.clientReq)
-	m.Client.SessionHint = detectSessionHint(m.Client.Headers, ex.clientReq)
-	m.Model.Requested = requestedModel(m.Client.Protocol, m.Client.Path, ex.clientReq)
+	// stream / session hint / model 等需要解析 body 的字段留到 finalize 再算，不占热路径。
+	var reqName string
 	if len(ex.clientReq) > 0 || ex.clientReqErr != nil {
-		name := "client.req" + bodyExt(m.Client.Headers.Get("Content-Type"), ex.clientReq)
-		truncated, err := writeWholeFile(filepath.Join(ex.dir, name), ex.clientReq, ex.rec.opts.MaxBodyBytes)
-		if err != nil {
-			return err
-		}
-		m.Client.RequestFile = name
+		reqName = "client.req" + bodyExt(m.Client.Headers.Get("Content-Type"), ex.clientReq)
+		m.Client.RequestFile = reqName
 		m.Client.RequestBytes = int64(len(ex.clientReq))
-		if truncated || ex.clientReqTruncated {
+		if int64(len(ex.clientReq)) > ex.rec.opts.MaxBodyBytes || ex.clientReqTruncated {
 			m.Truncated = true
 			m.Notes = append(m.Notes, "client request body truncated at max_body_bytes")
 		}
@@ -177,7 +176,34 @@ func (ex *Exchange) openLocked() error {
 			m.Notes = append(m.Notes, "client request body read error: "+ex.clientReqErr.Error())
 		}
 	}
-	return writeJSONAtomic(filepath.Join(ex.dir, fileMeta), m)
+	initialMeta, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	dir, body, limit := ex.dir, ex.clientReq, ex.rec.opts.MaxBodyBytes
+	ex.async("write client request", func() error {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		if reqName != "" {
+			if _, err := writeWholeFile(filepath.Join(dir, reqName), body, limit); err != nil {
+				return err
+			}
+		}
+		return writeFileAtomic(filepath.Join(dir, fileMeta), append(initialMeta, '\n'))
+	})
+	return nil
+}
+
+// async 在后台执行磁盘写入；finalize 会先等待全部完成。
+func (ex *Exchange) async(op string, fn func() error) {
+	ex.io.Add(1)
+	go func() {
+		defer ex.io.Done()
+		if err := fn(); err != nil {
+			ex.rec.fail(op, err)
+		}
+	}()
 }
 
 // captureClientResponse D：tee 回给客户端的字节。
@@ -192,15 +218,9 @@ func (ex *Exchange) captureClientResponse(p []byte, header http.Header) {
 	}
 	if ex.clientResp == nil {
 		ex.clientRespN = "client.resp" + responseExt(header.Get("Content-Type"))
-		f, err := createBodyFile(filepath.Join(ex.dir, ex.clientRespN), ex.rec.opts.MaxBodyBytes)
-		if err != nil {
-			ex.rec.fail("create client response file", err)
-			ex.clientResp = &bodyFile{closed: true}
-			return
-		}
-		ex.clientResp = f
+		ex.clientResp = newAsyncSink(filepath.Join(ex.dir, ex.clientRespN), "", ex.rec.opts.MaxBodyBytes)
 	}
-	ex.clientResp.write(p)
+	ex.clientResp.write(p, 0)
 }
 
 // finishFromGin 在 middleware 返回前调用（仍在请求 goroutine 内，gin.Context 有效）。
@@ -268,20 +288,28 @@ func (ex *Exchange) scheduleFinalize() {
 }
 
 func (ex *Exchange) finalize() {
+	ex.io.Wait()
 	ex.mu.Lock()
 	if ex.finalized {
 		ex.mu.Unlock()
 		return
 	}
 	ex.finalized = true
-	if err := ex.clientResp.close(); err != nil {
-		ex.rec.fail("close client response", err)
+	clientResp := ex.clientResp
+	ex.mu.Unlock()
+
+	clientResp.close()
+	res := clientResp.wait()
+	if res.err != nil {
+		ex.rec.fail("write client response", res.err)
 	}
+
+	ex.mu.Lock()
 	m := &ex.meta
-	if ex.clientResp != nil && ex.clientResp.f != nil {
+	if res.wrote {
 		m.Client.ResponseFile = ex.clientRespN
-		m.Client.ResponseBytes = ex.clientResp.n
-		if ex.clientResp.truncated {
+		m.Client.ResponseBytes = res.bytes
+		if res.truncated {
 			m.Truncated = true
 		}
 	}
@@ -311,6 +339,9 @@ func (ex *Exchange) finalize() {
 	}
 	ex.mu.Unlock()
 
+	m.Client.Stream = requestWantsStream(m.Client.Protocol, m.Client.Path, m.Client.Query, ex.clientReq)
+	m.Client.SessionHint = detectSessionHint(m.Client.Headers, ex.clientReq)
+	m.Model.Requested = requestedModel(m.Client.Protocol, m.Client.Path, ex.clientReq)
 	summarizeExchange(ex.dir, m)
 	if _, err := ex.rec.store.commit(ex.dir, m); err != nil {
 		ex.rec.fail("commit exchange", err)
@@ -353,10 +384,13 @@ func (ex *Exchange) beginAttempt(req *http.Request, accountID int64) *Attempt {
 	att := &Attempt{ex: ex, index: index, dir: filepath.Join(ex.dir, dirAttempt, strconv.Itoa(index)), start: time.Now()}
 	body, readErr := readAndRestoreRequestBody(req)
 	name := "upstream.req" + bodyExt(req.Header.Get("Content-Type"), body)
-	truncated, err := writeWholeFile(filepath.Join(att.dir, name), body, ex.rec.opts.MaxBodyBytes)
-	if err != nil {
-		ex.rec.fail("write upstream request", err)
-	}
+	limit := ex.rec.opts.MaxBodyBytes
+	truncated := int64(len(body)) > limit
+	reqPath := filepath.Join(att.dir, name)
+	ex.async("write upstream request", func() error {
+		_, err := writeWholeFile(reqPath, body, limit)
+		return err
+	})
 	ex.updateAttempt(index, func(a *AttemptMeta) {
 		a.RequestFile = filepath.ToSlash(filepath.Join(dirAttempt, strconv.Itoa(index), name))
 		a.BytesReq = int64(len(body))

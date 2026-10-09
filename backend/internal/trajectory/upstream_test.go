@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -219,9 +220,11 @@ func TestExchangeAbandonsBodiesNeverClosed(t *testing.T) {
 	require.NoError(t, err)
 	finish()
 
+	pattern := filepath.Join(rec.Root(), dirRaw, "*", "u*", "*")
 	require.Eventually(t, func() bool {
 		rec.Flush()
-		return len(rawExchanges(t, rec.Root())) == 1
+		matches, _ := filepath.Glob(pattern) // 条件函数在其他 goroutine 执行，不能调用 t / require
+		return len(matches) == 1
 	}, 2*time.Second, 10*time.Millisecond)
 	_, m := onlyExchange(t, rec)
 	require.Equal(t, OutcomeAbandoned, m.Attempts[0].Outcome)

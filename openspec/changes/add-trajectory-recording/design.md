@@ -92,7 +92,9 @@ client <─(D)─ [tee c.Writer]                                    <─(C)─ [
 
 ### 可靠写入
 
-- 每个文件都在 `spool/<id>/` 下用 `bufio.Writer`（64KB）追加写入，tee 中只做内存拷贝和写入页缓存，不做 fsync。
+- **热路径不碰磁盘**：A、B 与初始 meta 交给后台 goroutine 写入；C、D 的 tee 只把字节拷贝进内存队列（`asyncSink`），
+  由每个流各自的后台 goroutine 负责 mkdir / open / 带缓冲追加写入（不做 fsync）。磁盘变慢时数据暂存在内存，不会卡住流式输出。
+  需要解析 body 的 meta 字段（stream、session hint、requested model）在落定阶段计算。
 - 落定时：关闭文件 → 写 `meta.json` → `rename(spool/<id>, raw/<date>/u<uid>/<id>)` → 追加 `index.ndjson` → 异步写 PG 索引（失败会重试，且可通过 reindex 补齐）。
 - 启动时扫描 `spool/`：残留目录补写 `meta.json`，标为 `status=incomplete`，然后归档。
 - **没有内存队列，也就没有“队列满了丢弃”的路径。** 磁盘写满或写入失败时，录制自动降级为关闭，并在概览页报警；**网关请求本身不受影响**。

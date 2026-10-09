@@ -27,7 +27,7 @@ type Recorder struct {
 	stopOnce sync.Once
 	stop     chan struct{}
 	wg       sync.WaitGroup
-	pending  sync.WaitGroup // 异步落定中的 exchange
+	pending  inflight // 异步收尾 / 落定中的任务数
 
 	stats recorderCounters
 }
@@ -221,4 +221,39 @@ func (r *Recorder) noteUnattributed(req *http.Request) {
 		return
 	}
 	r.stats.backgroundCalls.Add(1)
+}
+
+// inflight 进行中任务计数。与 sync.WaitGroup 不同，它允许在 wait 期间并发 add（WaitGroup 规定
+// 计数为 0 时的 Add 必须先于 Wait 发生），适合“等到当前空闲”的语义。
+type inflight struct {
+	mu   sync.Mutex
+	cond *sync.Cond
+	n    int
+}
+
+func (f *inflight) Add(delta int) {
+	f.mu.Lock()
+	f.n += delta
+	if f.n < 0 {
+		f.mu.Unlock()
+		panic("trajectory: negative inflight counter")
+	}
+	if f.n == 0 && f.cond != nil {
+		f.cond.Broadcast()
+	}
+	f.mu.Unlock()
+}
+
+func (f *inflight) Done() { f.Add(-1) }
+
+// Wait 阻塞直到计数归零。
+func (f *inflight) Wait() {
+	f.mu.Lock()
+	if f.cond == nil {
+		f.cond = sync.NewCond(&f.mu)
+	}
+	for f.n > 0 {
+		f.cond.Wait()
+	}
+	f.mu.Unlock()
 }
