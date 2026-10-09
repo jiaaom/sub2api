@@ -7,7 +7,7 @@
 ## 1. 录全（Phase 1：raw 层）
 
 - [x] 1.1 `internal/trajectory/` 骨架：`ProviderSet`、`Exchange` / `Attempt` 句柄、`FromContext` / `WithExchange`
-- [ ] 1.2 开关：迁移 `900_trajectory_init.sql`（`trajectory_scopes`）+ repository + 进程内快照 + 判定函数（单测）
+- [x] 1.2 开关：迁移 `900_trajectory_init.sql`（`trajectory_scopes`）+ repository + 进程内快照 + 判定函数（单测）
 - [ ] 1.3 磁盘 writer：spool → rename → index.ndjson，启动时恢复 spool；`FORMAT.md` 写入（单测：崩溃恢复、并发、截断）
 - [ ] 1.4 `UpstreamDecorator`：包装 Do / DoWithTLS，录 B / C 和 timing，统计 orphan（单测：body 放回、GetBody、流式 tee、Close 提前）
 - [ ] 1.5 gin middleware：录 A / D，计算开关；在 `routes/gateway.go` 各路由组 `apiKeyAuth` 之后挂载（更新 Hook 清单）
