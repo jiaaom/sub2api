@@ -14,7 +14,7 @@
 - [x] 1.6 wire 接线 + `go generate`（更新 Hook 清单）
 - [x] 1.7 header 脱敏（单测）
 - [x] 1.8 meta.json：从 C 尽力解析 usage / response_id / model（四种协议）
-- [ ] 1.9 覆盖测试：对每个网关路由组发起请求（mock 上游），断言产生 exchange 且 orphan=0
+- [x] 1.9 覆盖测试：对每个网关路由组发起请求（mock 上游），断言产生 exchange 且 orphan=0
 - [ ] 1.10 （待用户验证）真实流量验证：Responses（SSE）、Chat Completions（含开源模型 reasoning_content）、Anthropic、Gemini 各至少一个完整 agent session
 - [ ] 1.11 benchmark：开关前后 TTFT / 吞吐对比
 
