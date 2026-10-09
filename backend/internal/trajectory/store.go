@@ -124,8 +124,18 @@ func (s *diskStore) recoverSpool(now func() time.Time) (int, error) {
 		}
 		dir := s.spoolDir(entry.Name())
 		meta := loadSpoolMeta(dir, entry.Name())
-		meta.Status = StatusIncomplete
 		meta.Recovered = true
+		if meta.Status == StatusComplete || meta.Status == StatusIncomplete || meta.Status == StatusError {
+			// 最终 meta 已写出、只差 rename（例如关停时异步落定被打断）：数据完整，保留原状态。
+			meta.Notes = append(meta.Notes, "commit resumed after restart")
+			if _, err := s.commit(dir, meta); err != nil {
+				errs = append(errs, fmt.Errorf("recover %s: %w", entry.Name(), err))
+				continue
+			}
+			recovered++
+			continue
+		}
+		meta.Status = StatusIncomplete
 		finished := now()
 		meta.FinishedAt = &finished
 		reconcileAttemptsFromDisk(dir, meta)

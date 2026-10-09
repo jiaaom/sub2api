@@ -133,3 +133,22 @@ func TestCommitFailureDegradesRecorder(t *testing.T) {
 	_, err := os.Stat(rec.store.spoolDir(ex.ID()))
 	require.NoError(t, err, "exchange stays in spool for recovery on next start")
 }
+
+func TestRecoverSpoolKeepsStatusWhenFinalMetaWasWritten(t *testing.T) {
+	root := t.TempDir()
+	id := uuid.Must(uuid.NewV7()).String()
+	dir := filepath.Join(root, dirSpool, id)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	finished := time.Date(2026, 10, 9, 8, 0, 1, 0, time.UTC)
+	m := Meta{FormatVersion: 1, ExchangeID: id, Status: StatusComplete, UserID: 4,
+		StartedAt: time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC), FinishedAt: &finished}
+	require.NoError(t, writeJSONAtomic(filepath.Join(dir, fileMeta), m))
+
+	rec, err := New(Options{Root: root}, nil)
+	require.NoError(t, err)
+	defer rec.Close()
+	got := readMeta(t, filepath.Join(root, "raw", "2026-10-09", "u4", id))
+	require.Equal(t, StatusComplete, got.Status)
+	require.True(t, got.Recovered)
+	require.Equal(t, finished, *got.FinishedAt)
+}
