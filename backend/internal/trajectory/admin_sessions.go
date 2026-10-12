@@ -44,6 +44,10 @@ func (r *Recorder) pgStore() (*pgIndexStore, error) {
 type SessionDetail struct {
 	Session   *SessionRow   `json:"session"`
 	Exchanges []ExchangeRow `json:"exchanges"`
+	// Subagents 本会话的 tool_call 派出的子 agent（按派出时间）。
+	Subagents []SubagentLink `json:"subagents"`
+	// Parent 子 agent 会话的父会话。
+	Parent *SessionRow `json:"parent,omitempty"`
 }
 
 // RawFile exchange 目录下的一个文件。
@@ -113,7 +117,18 @@ func adminGetSession(c *gin.Context) {
 		response.NotFound(c, "session not found")
 		return
 	}
-	response.Success(c, SessionDetail{Session: sess, Exchanges: rows})
+	d := SessionDetail{Session: sess, Exchanges: rows}
+	if d.Subagents, err = st.listSubagents(c.Request.Context(), sess.SessionID); err != nil {
+		response.InternalError(c, err.Error())
+		return
+	}
+	if sess.ParentSessionID != "" {
+		if d.Parent, _, err = st.getSession(c.Request.Context(), sess.ParentSessionID); err != nil {
+			response.InternalError(c, err.Error())
+			return
+		}
+	}
+	response.Success(c, d)
 }
 
 // exchangeDir 定位 exchange 目录：优先索引，其次扫描每日 index.ndjson。

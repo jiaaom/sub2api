@@ -58,8 +58,10 @@ export function durationMs(entry: ExchangeEntry): number | null {
  */
 export function trunkOf(rows: ExchangeRow[]): ExchangeRow[] {
   const byId = new Map(rows.map((r) => [r.exchange_id, r]))
-  const candidates = rows.filter((r) => r.kind === 'main')
-  const last = candidates[candidates.length - 1] ?? rows[rows.length - 1]
+  // 主会话取最后一个 main；子 agent 会话里全是 subagent，取最后一个 subagent。
+  const mains = rows.filter((r) => r.kind === 'main')
+  const subs = rows.filter((r) => r.kind === 'subagent')
+  const last = mains[mains.length - 1] ?? subs[subs.length - 1] ?? rows[rows.length - 1]
   const out: ExchangeRow[] = []
   const seen = new Set<string>()
   let cur: ExchangeRow | undefined = last

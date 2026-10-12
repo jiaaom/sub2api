@@ -40,10 +40,11 @@ func (a atom) String() string {
 }
 
 type ompEntry struct {
-	Type     string          `json:"type"`
-	ID       string          `json:"id"`
-	ParentID string          `json:"parentId"`
-	Message  json.RawMessage `json:"message"`
+	Type          string          `json:"type"`
+	ParentSession string          `json:"parentSession"`
+	ID            string          `json:"id"`
+	ParentID      string          `json:"parentId"`
+	Message       json.RawMessage `json:"message"`
 }
 
 type ompMessage struct {
@@ -59,6 +60,26 @@ type ompMessage struct {
 }
 
 // ompConversation omp 会话：session id 与从最后一条消息回溯到根的消息路径。
+// ompParentSession 子 agent 日志的 parentSession（父会话日志路径）对应的会话 id。
+func ompParentSession(t *testing.T, path string) string {
+	f, err := os.Open(path)
+	require.NoError(t, err)
+	defer func() { _ = f.Close() }()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 1<<20), 256<<20)
+	for sc.Scan() {
+		var e ompEntry
+		if json.Unmarshal(sc.Bytes(), &e) == nil && e.Type == "session" {
+			if e.ParentSession == "" {
+				return ""
+			}
+			pid, _, _, _ := ompConversation(t, e.ParentSession)
+			return pid
+		}
+	}
+	return ""
+}
+
 func ompConversation(t *testing.T, path string) (string, []atom, int, bool) {
 	f, err := os.Open(path)
 	require.NoError(t, err)
@@ -220,12 +241,19 @@ func irAtoms(msgs []ir.Message) ([]atom, int) {
 // trunk 与前端 trunkOf / displayFrom 相同的算法。
 func trunk(rows []ExchangeRow) []ExchangeRow {
 	byID := map[string]ExchangeRow{}
-	var last *ExchangeRow
+	var lastMain, lastSub *ExchangeRow
 	for i := range rows {
 		byID[rows[i].ExchangeID] = rows[i]
-		if rows[i].Kind == KindMain {
-			last = &rows[i]
+		switch rows[i].Kind {
+		case KindMain:
+			lastMain = &rows[i]
+		case KindSubagent:
+			lastSub = &rows[i]
 		}
+	}
+	last := lastMain
+	if last == nil {
+		last = lastSub
 	}
 	var out []ExchangeRow
 	seen := map[string]bool{}
@@ -280,7 +308,14 @@ func TestOmpE2E(t *testing.T) {
 	db, err := sql.Open("postgres", dsn)
 	require.NoError(t, err)
 	st := &pgIndexStore{db: db}
-	files, _ := filepath.Glob(filepath.Join(sessDir, "*.jsonl"))
+	// 子 agent 的日志在 <主会话>/<名字>.jsonl
+	var files []string
+	_ = filepath.WalkDir(sessDir, func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.HasSuffix(p, ".jsonl") {
+			files = append(files, p)
+		}
+		return nil
+	})
 	sort.Strings(files)
 	require.NotEmpty(t, files)
 	for _, file := range files {
@@ -291,6 +326,12 @@ func TestOmpE2E(t *testing.T) {
 			require.NoError(t, err, "no recorded session for omp session %s", ompID)
 			sess, rows, err := st.getSession(context.Background(), sid)
 			require.NoError(t, err)
+			if parentOmp := ompParentSession(t, file); parentOmp != "" {
+				var parentSid string
+				require.NoError(t, db.QueryRow(`SELECT session_id FROM trajectory_sessions WHERE hint = $1`, parentOmp).Scan(&parentSid))
+				require.Equal(t, parentSid, sess.ParentSessionID, "subagent session must point at the omp parent session")
+				t.Logf("subagent of %s via %s", parentOmp, sess.ParentCallID)
+			}
 			tr := trunk(rows)
 			byID := map[string]ExchangeRow{}
 			for _, r := range rows {

@@ -8,7 +8,7 @@
       </header>
 
       <main v-if="sessionId" class="card px-4 sm:px-6 lg:px-8">
-        <SessionReplay :session-id="sessionId" @back="closeSession" />
+        <SessionReplay :session-id="sessionId" @back="closeSession" @open-session="openSession" />
       </main>
 
       <div v-else class="mb-4" role="tablist" :aria-label="t('admin.recording.title')">

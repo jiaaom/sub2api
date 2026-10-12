@@ -163,6 +163,7 @@ describe('RecordingView sessions and replay', () => {
     mocks.getSession.mockResolvedValue({
       session: { session_id: 'hf01', user_id: 1, hint_source: '', hint: '', detected_client: 'oh-my-pi', first_at: '2026-10-12T03:07:42Z', last_at: '2026-10-12T03:11:59Z', exchanges: 2, input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, last_model: 'm', max_messages: 5, title: 'hello', label: '' },
       exchanges: [],
+      subagents: [],
     })
     const wrapper = mountView()
     await flushPromises()

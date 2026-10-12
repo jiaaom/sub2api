@@ -3,6 +3,7 @@ package trajectory
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -24,20 +25,23 @@ client_path, client_protocol, upstream_protocol, detected_client, model, session
 input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
 response_id, previous_response_id, root_hash, req_exact, req_nothink, req_loose, head_exact, head_nothink, head_loose,
 req_messages, resp_messages, tools, parent_id, edge, match_level, prefix_messages, kind,
-resp_text_head, resp_text_len, title, index_error`
+resp_text_head, resp_text_len, title, index_error, spawn_calls, parent_call_id`
 
 func scanExchange(sc interface{ Scan(...any) error }) (*ExchangeRow, error) {
 	var r ExchangeRow
 	var finished sql.NullTime
-	var parent sql.NullString
+	var parent, spawn sql.NullString
 	err := sc.Scan(&r.ExchangeID, &r.RawPath, &r.StartedAt, &finished, &r.UserID, &r.APIKeyID, &r.GroupID, &r.Status, &r.StatusCode,
 		&r.ClientPath, &r.ClientProtocol, &r.UpstreamProtocol, &r.DetectedClient, &r.Model, &r.SessionID, &r.SessionHint,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheWriteTokens, &r.ReasoningTokens,
 		&r.ResponseID, &r.PreviousResponseID, &r.RootHash, &r.Req[0], &r.Req[1], &r.Req[2], &r.Head[0], &r.Head[1], &r.Head[2],
 		&r.ReqMessages, &r.RespMessages, &r.Tools, &parent, &r.Edge, &r.MatchLevel, &r.PrefixMessages, &r.Kind,
-		&r.RespTextHead, &r.RespTextLen, &r.Title, &r.IndexError)
+		&r.RespTextHead, &r.RespTextLen, &r.Title, &r.IndexError, &spawn, &r.ParentCallID)
 	if err != nil {
 		return nil, err
+	}
+	if spawn.Valid && spawn.String != "" {
+		_ = json.Unmarshal([]byte(spawn.String), &r.SpawnCalls)
 	}
 	if finished.Valid {
 		t := finished.Time
@@ -52,19 +56,52 @@ func scanExchange(sc interface{ Scan(...any) error }) (*ExchangeRow, error) {
 
 func (s *pgIndexStore) insertExchange(ctx context.Context, r *ExchangeRow) (bool, error) {
 	res, err := s.db.ExecContext(ctx, `INSERT INTO trajectory_exchanges (`+exchangeColumns+`, rules_version)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45)
 ON CONFLICT (exchange_id) DO NOTHING`,
 		r.ExchangeID, r.RawPath, r.StartedAt, r.FinishedAt, r.UserID, r.APIKeyID, r.GroupID, r.Status, r.StatusCode,
 		r.ClientPath, r.ClientProtocol, r.UpstreamProtocol, r.DetectedClient, r.Model, r.SessionID, r.SessionHint,
 		r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheWriteTokens, r.ReasoningTokens,
 		r.ResponseID, r.PreviousResponseID, r.RootHash, r.Req[0], r.Req[1], r.Req[2], r.Head[0], r.Head[1], r.Head[2],
 		r.ReqMessages, r.RespMessages, r.Tools, r.ParentID, r.Edge, r.MatchLevel, r.PrefixMessages, r.Kind,
-		r.RespTextHead, r.RespTextLen, r.Title, r.IndexError, IndexRulesVersion)
+		r.RespTextHead, r.RespTextLen, r.Title, r.IndexError, spawnJSON(r.SpawnCalls), r.ParentCallID, IndexRulesVersion)
 	if err != nil {
 		return false, fmt.Errorf("insert trajectory exchange: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	return n > 0, nil
+}
+
+func spawnJSON(calls []SpawnCall) any {
+	if len(calls) == 0 {
+		return nil
+	}
+	b, _ := json.Marshal(calls)
+	return string(b)
+}
+
+func (s *pgIndexStore) spawnCandidates(ctx context.Context, userID int64, since, before time.Time, excludeID string, limit int) ([]ExchangeRow, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+exchangeColumns+` FROM trajectory_exchanges
+WHERE user_id = $1 AND started_at >= $2 AND started_at < $3 AND exchange_id <> $4 AND spawn_calls IS NOT NULL
+ORDER BY started_at DESC LIMIT $5`, userID, since, before, excludeID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("find trajectory spawn candidates: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []ExchangeRow
+	for rows.Next() {
+		r, err := scanExchange(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *r)
+	}
+	return out, rows.Err()
+}
+
+func (s *pgIndexStore) setSessionParent(ctx context.Context, sessionID, parentSessionID, parentExchangeID, parentCallID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE trajectory_sessions SET parent_session_id = $2, parent_exchange_id = $3, parent_call_id = $4
+WHERE session_id = $1`, sessionID, parentSessionID, parentExchangeID, parentCallID)
+	return err
 }
 
 func (s *pgIndexStore) upsertSession(ctx context.Context, r *ExchangeRow) error {
@@ -106,7 +143,7 @@ WHERE user_id = $1 AND response_id = $2 ORDER BY started_at DESC LIMIT 1`, userI
 }
 
 func (s *pgIndexStore) findCandidates(ctx context.Context, userID int64, before time.Time, excludeID string, level int, hashes []string) ([]linkCandidate, error) {
-	q := fmt.Sprintf(`SELECT exchange_id, session_id, started_at, %[1]s, %[2]s FROM trajectory_exchanges
+	q := fmt.Sprintf(`SELECT exchange_id, session_id, started_at, %[1]s, %[2]s, kind FROM trajectory_exchanges
 WHERE user_id = $1 AND started_at <= $2 AND exchange_id <> $3 AND (%[1]s = ANY($4) OR %[2]s = ANY($4))`,
 		reqColumns[level], headColumns[level])
 	rows, err := s.db.QueryContext(ctx, q, userID, before, excludeID, pq.Array(hashes))
@@ -117,7 +154,7 @@ WHERE user_id = $1 AND started_at <= $2 AND exchange_id <> $3 AND (%[1]s = ANY($
 	var out []linkCandidate
 	for rows.Next() {
 		var c linkCandidate
-		if err := rows.Scan(&c.ExchangeID, &c.SessionID, &c.StartedAt, &c.Req, &c.Head); err != nil {
+		if err := rows.Scan(&c.ExchangeID, &c.SessionID, &c.StartedAt, &c.Req, &c.Head, &c.Kind); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
@@ -195,8 +232,9 @@ func (s *pgIndexStore) markSummaries(ctx context.Context, sessionID, rootHash st
 }
 
 func (s *pgIndexStore) updateLink(ctx context.Context, r *ExchangeRow) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE trajectory_exchanges SET parent_id = $2, edge = $3, match_level = $4, prefix_messages = $5
-WHERE exchange_id = $1`, r.ExchangeID, r.ParentID, r.Edge, r.MatchLevel, r.PrefixMessages)
+	_, err := s.db.ExecContext(ctx, `UPDATE trajectory_exchanges SET parent_id = $2, edge = $3, match_level = $4, prefix_messages = $5,
+  kind = $6, parent_call_id = $7
+WHERE exchange_id = $1`, r.ExchangeID, r.ParentID, r.Edge, r.MatchLevel, r.PrefixMessages, r.Kind, r.ParentCallID)
 	return err
 }
 
@@ -329,14 +367,16 @@ func (s *pgIndexStore) getSession(ctx context.Context, id string) (*SessionRow, 
 }
 
 const sessionColumns = `s.session_id, s.user_id, s.hint_source, s.hint, s.detected_client, s.first_at, s.last_at, s.exchanges,
-  s.input_tokens, s.output_tokens, s.cache_read_tokens, s.last_model, s.max_messages, s.title, COALESCE(l.label, '')`
+  s.input_tokens, s.output_tokens, s.cache_read_tokens, s.last_model, s.max_messages, s.title, COALESCE(l.label, ''),
+  s.parent_session_id, s.parent_exchange_id, s.parent_call_id`
 
 const sessionLabelJoin = `LEFT JOIN trajectory_session_labels l ON l.session_id = s.session_id`
 
 func scanSession(sc interface{ Scan(...any) error }) (*SessionRow, error) {
 	var r SessionRow
 	err := sc.Scan(&r.SessionID, &r.UserID, &r.HintSource, &r.Hint, &r.DetectedClient, &r.FirstAt, &r.LastAt, &r.Exchanges,
-		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.LastModel, &r.MaxMessages, &r.Title, &r.Label)
+		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.LastModel, &r.MaxMessages, &r.Title, &r.Label,
+		&r.ParentSessionID, &r.ParentExchangeID, &r.ParentCallID)
 	if err != nil {
 		return nil, err
 	}
@@ -352,6 +392,40 @@ func (s *pgIndexStore) setSessionLabel(ctx context.Context, id, label string) er
 	_, err := s.db.ExecContext(ctx, `INSERT INTO trajectory_session_labels (session_id, label, updated_at) VALUES ($1, $2, NOW())
 ON CONFLICT (session_id) DO UPDATE SET label = EXCLUDED.label, updated_at = NOW()`, id, label)
 	return err
+}
+
+// SubagentLink 本会话里某次 tool_call 派出的子 agent。
+type SubagentLink struct {
+	ParentExchangeID string `json:"parent_exchange_id"`
+	ParentCallID     string `json:"parent_call_id"`
+	ExchangeID       string `json:"exchange_id"`
+	SessionID        string `json:"session_id"`
+	Title            string `json:"title"`
+	Exchanges        int    `json:"exchanges"`
+}
+
+func (s *pgIndexStore) listSubagents(ctx context.Context, sessionID string) ([]SubagentLink, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT e.parent_id, e.parent_call_id, e.exchange_id, e.session_id, COALESCE(NULLIF(l.label, ''), ss.title, ''), COALESCE(ss.exchanges, 0)
+FROM trajectory_exchanges e
+JOIN trajectory_exchanges p ON p.exchange_id = e.parent_id
+LEFT JOIN trajectory_sessions ss ON ss.session_id = e.session_id
+LEFT JOIN trajectory_session_labels l ON l.session_id = e.session_id
+WHERE e.edge = 'subagent' AND p.session_id = $1
+ORDER BY e.started_at`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := []SubagentLink{}
+	for rows.Next() {
+		var l SubagentLink
+		if err := rows.Scan(&l.ParentExchangeID, &l.ParentCallID, &l.ExchangeID, &l.SessionID, &l.Title, &l.Exchanges); err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
 }
 
 func (s *pgIndexStore) getExchange(ctx context.Context, id string) (*ExchangeRow, error) {

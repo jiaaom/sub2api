@@ -2,6 +2,7 @@ package trajectory
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -78,7 +79,7 @@ func (m *memIndexStore) findCandidates(_ context.Context, userID int64, before t
 			continue
 		}
 		if slices.Contains(hashes, r.Req[level]) || slices.Contains(hashes, r.Head[level]) {
-			out = append(out, linkCandidate{ExchangeID: r.ExchangeID, SessionID: r.SessionID, StartedAt: r.StartedAt, Req: r.Req[level], Head: r.Head[level]})
+			out = append(out, linkCandidate{ExchangeID: r.ExchangeID, SessionID: r.SessionID, StartedAt: r.StartedAt, Req: r.Req[level], Head: r.Head[level], Kind: r.Kind})
 		}
 	}
 	return out, nil
@@ -179,7 +180,30 @@ func (m *memIndexStore) updateLink(_ context.Context, u *ExchangeRow) error {
 	for _, r := range m.rows {
 		if r.ExchangeID == u.ExchangeID {
 			r.ParentID, r.Edge, r.MatchLevel, r.PrefixMessages = u.ParentID, u.Edge, u.MatchLevel, u.PrefixMessages
+			r.Kind, r.ParentCallID = u.Kind, u.ParentCallID
 		}
+	}
+	return nil
+}
+
+func (m *memIndexStore) spawnCandidates(_ context.Context, userID int64, since, before time.Time, exclude string, limit int) ([]ExchangeRow, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []ExchangeRow
+	for i := len(m.rows) - 1; i >= 0 && len(out) < limit; i-- {
+		r := m.rows[i]
+		if r.UserID == userID && r.ExchangeID != exclude && !r.StartedAt.Before(since) && r.StartedAt.Before(before) && len(r.SpawnCalls) > 0 {
+			out = append(out, *r)
+		}
+	}
+	return out, nil
+}
+
+func (m *memIndexStore) setSessionParent(_ context.Context, session, parentSession, parentExchange, callID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if s := m.sessions[session]; s != nil {
+		s.ParentSessionID, s.ParentExchangeID, s.ParentCallID = parentSession, parentExchange, callID
 	}
 	return nil
 }
@@ -534,4 +558,42 @@ func TestIndexUpstreamFailuresAndResends(t *testing.T) {
 	m, err := loadMetaFile(dir)
 	require.NoError(t, err)
 	require.Equal(t, StatusError, m.Status, "finalize writes error when no attempt succeeded")
+}
+
+func TestIndexLinksSubagentToSpawningToolCall(t *testing.T) {
+	tr := newTraj(t)
+	task := "# Target\nFile: notes.md in the working directory.\n\n# Change\nCreate notes.md with exactly three bullet points about tail recursion."
+	args, _ := json.Marshal(map[string]any{"i": "Delegating", "tasks": []map[string]string{{"name": "NotesWriter", "task": task}}})
+	taskCall := fmt.Sprintf(`{"type":"function_call","call_id":"call_task","name":"task","arguments":%q}`, string(args))
+	tr.send("main1", "main", arr(u1), arr(reasoning, taskCall))
+
+	// 子 agent：自己的 system 与会话标识，第一条用户消息 = 前缀 + task 文本
+	tr.instructions = "sub system with context"
+	subFirst := fmt.Sprintf(`{"role":"user","content":[{"type":"input_text","text":"<system-reminder>cwd</system-reminder>"},{"type":"input_text","text":%q}]}`, "Complete assignment thoroughly:\n\n"+task)
+	writeCall := `{"type":"function_call","call_id":"call_w","name":"write","arguments":"{\"path\":\"notes.md\"}"}`
+	tr.send("sub1", "sub", arr(subFirst), arr(writeCall))
+	tr.send("sub2", "sub", arr(subFirst, writeCall, `{"type":"function_call_output","call_id":"call_w","output":"ok"}`), arr(a2))
+
+	// 主 agent 继续
+	tr.instructions = "sys"
+	tr.send("main2", "main", arr(u1, taskCall, `{"type":"function_call_output","call_id":"call_task","output":"Spawned agent NotesWriter"}`), arr(a1))
+
+	// 反例：长文本只出现在 system 里，不算子 agent
+	tr.instructions = "rules: " + task
+	tr.send("other", "other", arr(`{"role":"user","content":"unrelated question that is long enough to be considered for matching, really it is"}`), arr(a1))
+
+	tr.requireEdge("sub1", "main1", EdgeSubagent, "task_args", 0)
+	require.Equal(t, "call_task", tr.row("sub1").ParentCallID)
+	require.Equal(t, KindSubagent, tr.row("sub1").Kind)
+	tr.requireEdge("sub2", "sub1", EdgeContinue, "exact", 2)
+	require.Equal(t, KindSubagent, tr.row("sub2").Kind, "later subagent turns inherit the kind")
+	tr.requireEdge("main2", "main1", EdgeContinue, "no_thinking", 2)
+	require.Equal(t, KindMain, tr.row("main2").Kind)
+	tr.requireEdge("other", "", EdgeRoot, "", 0)
+
+	sub := tr.store.sessions[tr.row("sub1").SessionID]
+	require.Equal(t, tr.row("main1").SessionID, sub.ParentSessionID)
+	require.Equal(t, tr.ids["main1"], sub.ParentExchangeID)
+	require.Equal(t, "call_task", sub.ParentCallID)
+	require.True(t, strings.HasPrefix(tr.row("sub1").Title, "Complete assignment thoroughly: # Target"), tr.row("sub1").Title)
 }

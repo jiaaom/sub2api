@@ -124,6 +124,10 @@ export interface SessionRow {
   title: string
   /** 用户自定义名称，空串表示未命名 */
   label: string
+  /** 子 agent 会话：派出它的会话 / exchange / tool_call */
+  parent_session_id?: string
+  parent_exchange_id?: string
+  parent_call_id?: string
 }
 
 export interface SessionPage {
@@ -140,7 +144,7 @@ export interface SessionFilters {
   model: string
 }
 
-export type EdgeType = 'root' | 'continue' | 'branch' | 'retry' | 'pointer' | 'compaction' | 'summarize'
+export type EdgeType = 'root' | 'continue' | 'branch' | 'retry' | 'pointer' | 'compaction' | 'summarize' | 'subagent'
 
 export interface ExchangeRow {
   exchange_id: string
@@ -175,13 +179,27 @@ export interface ExchangeRow {
   match_level?: string
   prefix_messages: number
   kind: string
+  parent_call_id?: string
   title?: string
   index_error?: string
+}
+
+export interface SubagentLink {
+  parent_exchange_id: string
+  parent_call_id: string
+  exchange_id: string
+  session_id: string
+  title: string
+  exchanges: number
 }
 
 export interface SessionDetail {
   session: SessionRow
   exchanges: ExchangeRow[]
+  /** 本会话的 tool_call 派出的子 agent */
+  subagents: SubagentLink[]
+  /** 子 agent 会话的父会话 */
+  parent?: SessionRow
 }
 
 export type BlockType =

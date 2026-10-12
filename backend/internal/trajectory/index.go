@@ -17,7 +17,7 @@ import (
 
 // IndexRulesVersion 串联 / 分类规则版本。改动 index*.go 或 ir/canon.go 的判定逻辑时 +1，
 // 启动后会自动清空索引并从 raw/ 全量重建。
-const IndexRulesVersion = 4
+const IndexRulesVersion = 5
 
 const (
 	EdgeRoot       = "root"
@@ -29,12 +29,22 @@ const (
 	// EdgeSummarize 独立发出的压缩请求（omp 等把旧对话拍平成一条消息、另起 system）挂回它所总结的主线 exchange：
 	// 同一会话里在它之前最近的 main exchange（h0 不同）。这样回放主干能穿过压缩点。
 	EdgeSummarize = "summarize"
+	// EdgeSubagent 子 agent 的第一轮挂到派出它的那次 tool_call 所在的 exchange（parent_call_id 记录 call id）：
+	// 新根的第一条用户消息包含该 tool_call 的某个长字符串参数（omp task 的 tasks[].task、Claude Code Task 的 prompt）。
+	EdgeSubagent = "subagent"
 
 	KindMain              = "main"
 	KindCompactionRequest = "compaction_request"
 	KindCountTokens       = "count_tokens"
 	// KindSummary 与压缩请求同一个总结用 system（同 h0）、但输出没被新根用到的旁路总结调用（omp 每次压缩会发 2–3 个）。
 	KindSummary = "summary"
+	// KindSubagent 子 agent 的 exchange（第一轮由 EdgeSubagent 判定，后续轮次从父节点继承）。
+	KindSubagent = "subagent"
+
+	spawnMinRunes        = 64
+	spawnHeadBytes       = 200
+	spawnLookback        = 6 * time.Hour
+	spawnCandidatesLimit = 200
 
 	indexQueueSize        = 4096
 	compactionMinTextLen  = 200
@@ -80,13 +90,26 @@ type ExchangeRow struct {
 	MatchLevel         string     `json:"match_level,omitempty"`
 	PrefixMessages     int        `json:"prefix_messages"`
 	Kind               string     `json:"kind"`
-	RespTextHead       string     `json:"-"`
-	RespTextLen        int        `json:"-"`
-	Title              string     `json:"title,omitempty"`
-	IndexError         string     `json:"index_error,omitempty"`
+	// ParentCallID 子 agent 的第一轮：派出它的 tool_call id。
+	ParentCallID string `json:"parent_call_id,omitempty"`
+	// SpawnCalls 响应里 tool_call 的长字符串参数开头（子 agent 匹配用）。
+	SpawnCalls   []SpawnCall `json:"-"`
+	RespTextHead string      `json:"-"`
+	RespTextLen  int         `json:"-"`
+	Title        string      `json:"title,omitempty"`
+	IndexError   string      `json:"index_error,omitempty"`
 
 	// 仅用于建立 session 的提示来源，不入库。
 	hintSource string
+	// parentSessionID 子 agent 第一轮时父 exchange 所在的会话，写入 trajectory_sessions。
+	parentSessionID string
+}
+
+// SpawnCall 一个可能派出子 agent 的 tool_call。
+type SpawnCall struct {
+	CallID string   `json:"call_id"`
+	Name   string   `json:"name"`
+	Heads  []string `json:"heads"`
 }
 
 // SessionRow trajectory_sessions 的一行。
@@ -105,6 +128,10 @@ type SessionRow struct {
 	LastModel       string    `json:"last_model"`
 	MaxMessages     int       `json:"max_messages"`
 	Title           string    `json:"title"`
+	// 子 agent 会话：派出它的会话 / exchange / tool_call。
+	ParentSessionID  string `json:"parent_session_id,omitempty"`
+	ParentExchangeID string `json:"parent_exchange_id,omitempty"`
+	ParentCallID     string `json:"parent_call_id,omitempty"`
 	// Label 用户自定义名称（trajectory_session_labels），为空表示未命名。
 	Label string `json:"label"`
 }
@@ -116,6 +143,7 @@ type linkCandidate struct {
 	StartedAt  time.Time
 	Req        string
 	Head       string
+	Kind       string
 }
 
 // indexStore 索引的存储（Postgres 实现见 index_pg.go，测试用内存实现）。
@@ -135,8 +163,12 @@ type indexStore interface {
 	latestMainBefore(ctx context.Context, sessionID string, before time.Time, excludeRoot string) (*ExchangeRow, error)
 	// markSummaries 把会话中与压缩请求同 h0 的其它 main exchange 标为 summary。
 	markSummaries(ctx context.Context, sessionID, rootHash string) error
-	// updateLink 只更新串联字段：parent_id / edge / match_level / prefix_messages。
+	// updateLink 只更新串联字段：parent_id / edge / match_level / prefix_messages / kind / parent_call_id。
 	updateLink(ctx context.Context, row *ExchangeRow) error
+	// spawnCandidates 同一用户 [since, before) 之间开始、带 spawn_calls 的 exchange，按开始时间倒序。
+	spawnCandidates(ctx context.Context, userID int64, since, before time.Time, excludeID string, limit int) ([]ExchangeRow, error)
+	// setSessionParent 记录子 agent 会话的父会话。
+	setSessionParent(ctx context.Context, sessionID, parentSessionID, parentExchangeID, parentCallID string) error
 	existingIDs(ctx context.Context, ids []string) (map[string]bool, error)
 	truncate(ctx context.Context) error
 	getState(ctx context.Context, key string) (string, error)
@@ -420,19 +452,22 @@ func (ix *Indexer) indexOne(ctx context.Context, dir string, meta *Meta) error {
 		return err
 	}
 	ix.indexed.Add(1)
-	if err := ix.afterLink(ctx, row); err != nil {
-		return err
-	}
 	if row.Kind != KindCountTokens {
 		if err := ix.store.upsertSession(ctx, row); err != nil {
 			return err
 		}
+	}
+	if err := ix.afterLink(ctx, row); err != nil {
+		return err
 	}
 	return ix.relinkInFlight(ctx, row)
 }
 
 // afterLink 串联确定后的连带更新：compaction 边把父节点标为压缩请求，并把独立发出的压缩请求挂回主线。
 func (ix *Indexer) afterLink(ctx context.Context, row *ExchangeRow) error {
+	if row.Edge == EdgeSubagent && row.ParentID != nil && row.parentSessionID != "" && row.parentSessionID != row.SessionID {
+		return ix.store.setSessionParent(ctx, row.SessionID, row.parentSessionID, *row.ParentID, row.ParentCallID)
+	}
 	if row.Edge != EdgeCompaction || row.ParentID == nil {
 		return nil
 	}
@@ -492,7 +527,12 @@ func (ix *Indexer) relinkInFlight(ctx context.Context, late *ExchangeRow) error 
 		if err := ix.link(ctx, fresh, p.req, p.resp); err != nil {
 			return err
 		}
-		if equalPtr(fresh.ParentID, old.ParentID) && fresh.Edge == old.Edge && fresh.MatchLevel == old.MatchLevel && fresh.PrefixMessages == old.PrefixMessages {
+		// compaction_request / summary 是事后由别的行标上的，重新串联不能把它们改回 main；只处理 subagent 的变化。
+		if fresh.Kind != KindSubagent && old.Kind != KindSubagent {
+			fresh.Kind = old.Kind
+		}
+		if equalPtr(fresh.ParentID, old.ParentID) && fresh.Edge == old.Edge && fresh.MatchLevel == old.MatchLevel &&
+			fresh.PrefixMessages == old.PrefixMessages && fresh.Kind == old.Kind && fresh.ParentCallID == old.ParentCallID {
 			continue
 		}
 		if err := ix.store.updateLink(ctx, fresh); err != nil {
@@ -570,6 +610,7 @@ func (ix *Indexer) link(ctx context.Context, row *ExchangeRow, req *ir.Request, 
 		respMsgs = resp.Messages
 		row.RespMessages = len(respMsgs)
 		row.RespTextHead, row.RespTextLen = responseTextHead(resp)
+		row.SpawnCalls = spawnCalls(resp)
 	}
 	row.RootHash = ir.Root(req)
 
@@ -584,6 +625,9 @@ func (ix *Indexer) link(ctx context.Context, row *ExchangeRow, req *ir.Request, 
 			row.ParentID = &parent.ExchangeID
 			row.Edge, row.MatchLevel = EdgePointer, "pointer"
 			row.RootHash = parent.RootHash
+			if parent.Kind == KindSubagent {
+				row.Kind = KindSubagent
+			}
 			if row.SessionID == "" {
 				row.SessionID = parent.SessionID
 			}
@@ -606,9 +650,116 @@ func (ix *Indexer) link(ctx context.Context, row *ExchangeRow, req *ir.Request, 
 		if err := ix.linkCompaction(ctx, row, req); err != nil {
 			return err
 		}
+	}
+	if row.ParentID == nil {
+		if err := ix.linkSubagent(ctx, row, req); err != nil {
+			return err
+		}
+	}
+	if row.ParentID == nil || row.Edge == EdgeSubagent {
 		row.Title = requestTitle(req)
 	}
 	return nil
+}
+
+// linkSubagent 新根的开头用户消息包含之前某个 tool_call 的长字符串参数 → 该调用派出的子 agent。
+// 只看用户消息，不看 system：主 agent 写进文件的长内容可能出现在后续会话的 system（规则文件）里。
+func (ix *Indexer) linkSubagent(ctx context.Context, row *ExchangeRow, req *ir.Request) error {
+	text := normalizeSpace(leadingUserText(req, 2))
+	if len([]rune(text)) < spawnMinRunes {
+		return nil
+	}
+	cands, err := ix.store.spawnCandidates(ctx, row.UserID, row.StartedAt.Add(-spawnLookback), row.StartedAt, row.ExchangeID, spawnCandidatesLimit)
+	if err != nil {
+		return err
+	}
+	for _, c := range cands {
+		for _, call := range c.SpawnCalls {
+			for _, head := range call.Heads {
+				if strings.Contains(text, head) {
+					id := c.ExchangeID
+					row.ParentID = &id
+					row.Edge, row.MatchLevel, row.PrefixMessages = EdgeSubagent, "task_args", 0
+					row.Kind = KindSubagent
+					row.ParentCallID = call.CallID
+					row.parentSessionID = c.SessionID
+					return nil
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// leadingUserText 前 n 条消息中用户消息的文本。
+func leadingUserText(req *ir.Request, n int) string {
+	var parts []string
+	for i, m := range req.Messages {
+		if i >= n {
+			break
+		}
+		if m.Role != ir.RoleUser {
+			continue
+		}
+		for _, b := range m.Blocks {
+			if b.Type == ir.BlockText {
+				parts = append(parts, b.Text)
+			}
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// spawnCalls 收集响应中 tool_call 参数里足够长的字符串（规范化后取开头）。
+func spawnCalls(resp *ir.Response) []SpawnCall {
+	var out []SpawnCall
+	for _, m := range resp.Messages {
+		for _, b := range m.Blocks {
+			if b.Type != ir.BlockToolCall {
+				continue
+			}
+			var strs []string
+			if b.Arguments != nil {
+				var v any
+				if json.Unmarshal(b.Arguments, &v) == nil {
+					strs = collectStrings(v, strs)
+				}
+			} else if b.ArgumentsRaw != "" {
+				strs = append(strs, b.ArgumentsRaw)
+			}
+			var heads []string
+			for _, s := range strs {
+				n := normalizeSpace(s)
+				if len([]rune(n)) < spawnMinRunes {
+					continue
+				}
+				if len(n) > spawnHeadBytes {
+					n = strings.ToValidUTF8(n[:spawnHeadBytes], "")
+				}
+				heads = append(heads, n)
+			}
+			if len(heads) > 0 {
+				out = append(out, SpawnCall{CallID: b.ID, Name: b.Name, Heads: heads})
+			}
+		}
+	}
+	return out
+}
+
+func collectStrings(v any, out []string) []string {
+	switch x := v.(type) {
+	case string:
+		out = append(out, x)
+	case []any:
+		for _, e := range x {
+			out = collectStrings(e, out)
+		}
+	case map[string]any:
+		for _, e := range x {
+			out = collectStrings(e, out)
+		}
+	}
+	return out
 }
 
 func (ix *Indexer) fillHashes(row *ExchangeRow, chains []ir.Chain, respMsgs []ir.Message, offset int) {
@@ -668,6 +819,9 @@ func (ix *Indexer) linkByPrefix(ctx context.Context, row *ExchangeRow, chains []
 	parentID := b.cand.ExchangeID
 	row.ParentID = &parentID
 	row.MatchLevel = ir.Levels[b.level].String()
+	if b.cand.Kind == KindSubagent {
+		row.Kind = KindSubagent
+	}
 	if b.pos > 0 {
 		row.PrefixMessages = chains[b.level].MsgIndex[b.pos-1] + 1
 	}

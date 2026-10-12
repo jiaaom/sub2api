@@ -92,6 +92,7 @@ describe('SessionReplay', () => {
       row('b', { parent_id: 'a', edge: 'continue', match_level: 'no_thinking', prefix_messages: 2, req_messages: 3 }),
       row('b2', { parent_id: 'b', edge: 'retry', prefix_messages: 3, req_messages: 3 }),
     ],
+    subagents: [{ parent_exchange_id: 'a', parent_call_id: 'call_task', exchange_id: 'sub1', session_id: 'sub', title: 'Complete assignment thoroughly', exchanges: 2 }],
   }
 
   beforeEach(() => {
@@ -129,5 +130,48 @@ describe('SessionReplay', () => {
     expect(card.find('[data-test="block-tool-call"]').text()).toContain('"path": "."')
     expect(wrapper.find('[data-test="exchange-a"] [data-test="system-prompt"]').exists()).toBe(true)
     expect(wrapper.find('[data-test="exchange-b2"] [data-test="edge-badge"]').text()).toContain('admin.recording.replay.edge.retry')
+
+    // 派出子 agent 的那一轮显示子 agent，点击打开子会话
+    const box = wrapper.find('[data-test="exchange-a"] [data-test="subagents"]')
+    expect(box.text()).toContain('call_task')
+    expect(wrapper.find('[data-test="exchange-b"] [data-test="subagents"]').exists()).toBe(false)
+    await box.find('[data-test="open-subagent-sub"]').trigger('click')
+    expect(wrapper.emitted('open-session')?.[0]).toEqual(['sub'])
+  })
+})
+
+describe('SessionReplay for a subagent session', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.stubGlobal('IntersectionObserver', class {
+      constructor(private cb: (entries: { isIntersecting: boolean }[]) => void) {}
+      observe() { this.cb([{ isIntersecting: true }]) }
+      disconnect() {}
+    })
+  })
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('shows the parent session breadcrumb and builds the trunk from subagent rows', async () => {
+    const base = { user_id: 1, hint_source: '', hint: '', detected_client: 'oh-my-pi', first_at: '2026-10-12T03:07:42Z', last_at: '2026-10-12T03:11:59Z', exchanges: 2, input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, last_model: 'm', max_messages: 3, label: '' }
+    mocks.getSession.mockResolvedValue({
+      session: { ...base, session_id: 'sub', title: 'Complete assignment', parent_session_id: 'main', parent_exchange_id: 'a', parent_call_id: 'call_task' },
+      exchanges: [
+        row('sub1', { session_id: 'sub', kind: 'subagent', parent_id: 'a', edge: 'subagent', match_level: 'task_args' }),
+        row('sub2', { session_id: 'sub', kind: 'subagent', parent_id: 'sub1', edge: 'continue', prefix_messages: 2, req_messages: 3 }),
+      ],
+      subagents: [],
+      parent: { ...base, session_id: 'main', title: 'main task', label: 'my label' },
+    })
+    mocks.getExchange.mockResolvedValue({ meta: { exchange_id: 'x' }, dir: '/d', files: [], messages_from: 0, total_messages: 1, request: { protocol: 'openai_responses', messages: [] } })
+    const wrapper = mount(SessionReplay, { props: { sessionId: 'sub' } })
+    await flushPromises()
+    const crumb = wrapper.find('[data-test="parent-session"]')
+    expect(crumb.text()).toContain('my label')
+    expect(crumb.text()).toContain('call_task')
+    await crumb.find('button').trigger('click')
+    expect(wrapper.emitted('open-session')?.[0]).toEqual(['main'])
+    expect(wrapper.find('[data-test="exchange-sub1"] [data-test="edge-badge"]').text()).toContain('admin.recording.replay.edge.subagentExternal')
+    expect(wrapper.find('[data-test="exchange-sub2"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="trunk-hint"]').exists()).toBe(false)
   })
 })

@@ -89,6 +89,19 @@
           <pre v-if="detail.response.error" class="mt-3 overflow-auto rounded-lg bg-red-50 p-2 text-xs text-red-700 dark:bg-red-950/30 dark:text-red-300">{{ prettyJSON(detail.response.error) }}</pre>
         </div>
       </template>
+      <div v-if="subagents?.length" class="mt-4 rounded-lg border border-teal-200 bg-teal-50/50 px-3 py-2 dark:border-teal-900/60 dark:bg-teal-950/20" data-test="subagents">
+        <p class="text-xs font-semibold text-teal-800 dark:text-teal-200">{{ t('admin.recording.replay.subagents.title', { n: subagents.length }) }}</p>
+        <ul class="mt-2 space-y-1.5">
+          <li v-for="s in subagents" :key="s.exchange_id" class="flex flex-wrap items-center gap-2 text-xs text-teal-900 dark:text-teal-100">
+            <span class="font-mono text-teal-600/80 dark:text-teal-400/80">{{ s.parent_call_id }}</span>
+            <span class="min-w-0 max-w-xl truncate">{{ s.title || s.session_id }}</span>
+            <span class="tabular-nums text-teal-700/70 dark:text-teal-300/70">{{ t('admin.recording.replay.subagents.turns', { n: s.exchanges }) }}</span>
+            <button v-if="s.session_id !== row.session_id" type="button" class="font-medium text-primary-600 hover:underline dark:text-primary-400" :data-test="`open-subagent-${s.session_id}`" @click="$emit('open-session', s.session_id)">
+              {{ t('admin.recording.replay.subagents.open') }} →
+            </button>
+          </li>
+        </ul>
+      </div>
     </div>
   </article>
 </template>
@@ -99,13 +112,13 @@ import { useI18n } from 'vue-i18n'
 import { formatDateTime } from '@/utils/format'
 import { extractApiErrorMessage } from '@/utils/apiError'
 import recordingAPI from '../api'
-import type { ExchangeDetail, ExchangeRow } from '../types'
+import type { ExchangeDetail, ExchangeRow, SubagentLink } from '../types'
 import { cacheRatio, formatCount, messagesFrom, prefixRatio, prettyJSON, totalInput } from '../viewModel'
 import BlockView from './BlockView.vue'
 import MessageView from './MessageView.vue'
 
-const props = defineProps<{ row: ExchangeRow; number: number; parentNumber?: number; openThinking?: boolean; from?: number }>()
-defineEmits<{ (e: 'raw', id: string): void }>()
+const props = defineProps<{ row: ExchangeRow; number: number; parentNumber?: number; openThinking?: boolean; from?: number; subagents?: SubagentLink[] }>()
+defineEmits<{ (e: 'raw', id: string): void; (e: 'open-session', id: string): void }>()
 
 const { t } = useI18n()
 const root = ref<HTMLElement | null>(null)
@@ -155,6 +168,8 @@ const edgeText = computed(() => {
       return t('admin.recording.replay.edge.root')
     case 'compaction':
       return t('admin.recording.replay.edge.compaction', { n: p ?? '?' })
+    case 'subagent':
+      return p ? t('admin.recording.replay.edge.subagent', { n: p }) : t('admin.recording.replay.edge.subagentExternal')
     default:
       return t(`admin.recording.replay.edge.${props.row.edge}`, { n: p ?? '?' })
   }
@@ -172,6 +187,8 @@ const edgeClass = computed(() => {
     case 'compaction':
     case 'summarize':
       return 'bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300'
+    case 'subagent':
+      return 'bg-teal-50 text-teal-700 dark:bg-teal-950/40 dark:text-teal-300'
     default:
       return 'bg-gray-100 text-gray-600 dark:bg-dark-700 dark:text-dark-300'
   }

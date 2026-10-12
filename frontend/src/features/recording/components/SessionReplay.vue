@@ -5,6 +5,13 @@
         <button type="button" class="text-sm text-primary-600 hover:underline dark:text-primary-400" data-test="replay-back" @click="$emit('back')">
           ← {{ t('admin.recording.replay.back') }}
         </button>
+        <p v-if="detail?.parent" class="mt-2 text-xs text-teal-700 dark:text-teal-300" data-test="parent-session">
+          {{ t('admin.recording.replay.subagentOf') }}
+          <button type="button" class="font-medium underline" @click="$emit('open-session', detail.parent.session_id)">
+            {{ detail.parent.label || detail.parent.title || detail.parent.session_id }}
+          </button>
+          <span v-if="detail.session.parent_call_id" class="ml-1 font-mono text-teal-600/70">({{ detail.session.parent_call_id }})</span>
+        </p>
         <h2 class="mt-2 flex min-w-0 text-lg font-semibold text-gray-950 dark:text-white">
           <SessionLabelEditor v-if="detail" :session-id="detail.session.session_id" :label="detail.session.label" :title="detail.session.title" @saved="detail.session.label = $event" />
         </h2>
@@ -54,7 +61,9 @@
           :parent-number="row.parent_id ? numbers.get(row.parent_id) : undefined"
           :open-thinking="openThinking"
           :from="displayFrom(row, byId, visibleIds)"
+          :subagents="subagentsOf.get(row.exchange_id)"
           @raw="rawId = $event"
+          @open-session="$emit('open-session', $event)"
         />
       </div>
     </template>
@@ -70,14 +79,14 @@ import { useAppStore } from '@/stores/app'
 import { formatDateTime } from '@/utils/format'
 import { extractApiErrorMessage } from '@/utils/apiError'
 import recordingAPI from '../api'
-import type { SessionDetail } from '../types'
+import type { SessionDetail, SubagentLink } from '../types'
 import { displayFrom, formatCount, numberRows, trunkOf } from '../viewModel'
 import ExchangeCard from './ExchangeCard.vue'
 import RawViewer from './RawViewer.vue'
 import SessionLabelEditor from './SessionLabelEditor.vue'
 
 const props = defineProps<{ sessionId: string }>()
-defineEmits<{ (e: 'back'): void }>()
+defineEmits<{ (e: 'back'): void; (e: 'open-session', id: string): void }>()
 const { t } = useI18n()
 const appStore = useAppStore()
 
@@ -93,6 +102,11 @@ const trunk = computed(() => trunkOf(detail.value?.exchanges ?? []))
 const visible = computed(() => (mode.value === 'trunk' ? trunk.value : detail.value?.exchanges ?? []))
 const byId = computed(() => new Map((detail.value?.exchanges ?? []).map((r) => [r.exchange_id, r])))
 const visibleIds = computed(() => new Set(visible.value.map((r) => r.exchange_id)))
+const subagentsOf = computed(() => {
+  const m = new Map<string, SubagentLink[]>()
+  for (const s of detail.value?.subagents ?? []) m.set(s.parent_exchange_id, [...(m.get(s.parent_exchange_id) ?? []), s])
+  return m
+})
 const hidden = computed(() => (detail.value?.exchanges.length ?? 0) - trunk.value.length)
 
 async function load(id: string) {

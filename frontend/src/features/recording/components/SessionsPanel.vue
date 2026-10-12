@@ -49,7 +49,10 @@
             @keydown.enter="$emit('open', s.session_id)"
           >
             <td class="max-w-md px-3 py-2">
-              <SessionLabelEditor class="font-medium text-gray-900 dark:text-white" :session-id="s.session_id" :label="s.label" :title="s.title" @saved="s.label = $event" />
+              <span class="flex min-w-0 items-center gap-1.5">
+                <span v-if="s.parent_session_id" class="shrink-0 rounded bg-teal-50 px-1.5 py-0.5 text-[10px] font-semibold text-teal-700 dark:bg-teal-950/40 dark:text-teal-300" data-test="subagent-badge">{{ t('admin.recording.sessions.subagentBadge') }}</span>
+                <SessionLabelEditor class="font-medium text-gray-900 dark:text-white" :session-id="s.session_id" :label="s.label" :title="s.title" @saved="s.label = $event" />
+              </span>
               <span v-if="s.label && s.title" class="block truncate text-xs text-gray-500 dark:text-dark-400">{{ s.title }}</span>
               <span class="block truncate font-mono text-[11px] text-gray-400" :title="s.hint">{{ s.hint || s.session_id }}</span>
             </td>
