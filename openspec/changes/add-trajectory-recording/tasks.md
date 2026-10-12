@@ -27,12 +27,12 @@
 ## 3. 索引与 IR
 
 - [ ] 3.1 迁移：`trajectory_exchanges`、`trajectory_sessions`；异步索引写入 + `reindex` 命令
-- [ ] 3.2 IR 类型定义 + 四个协议适配器（请求解析 + 流式拼接），用 golden fixture 测试
+- [x] 3.2 IR 类型定义 + 四个协议适配器（请求解析 + 流式拼接），用 golden fixture 测试
 - [ ] 3.3 Responses `previous_response_id` 链展开
 
 ## 4. 串联（trajectory DAG）
 
-- [ ] 4.1 规范化 + 前缀哈希链（单测：cache_control 移动、key 重排、thinking 剥离）
+- [x] 4.1 规范化 + 前缀哈希链（单测：cache_control 移动、key 重排、thinking 剥离）
 - [ ] 4.2 DAG 构建：后续 / 分支 / 宽松匹配等级
 - [ ] 4.3 session 归组（hint 优先，DAG 连通分量兜底）
 - [ ] 4.3a compaction 串联：摘要内容匹配（Claude Code / pi）+ Responses compact item 精确匹配；rewrite 检测（tool_call id 锚点对齐）；Anthropic `context_management` 的 applied_edits 记录
