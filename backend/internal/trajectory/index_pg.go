@@ -188,6 +188,12 @@ ORDER BY started_at DESC LIMIT 1`, sessionID, before, excludeRoot))
 	return r, err
 }
 
+func (s *pgIndexStore) markSummaries(ctx context.Context, sessionID, rootHash string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE trajectory_exchanges SET kind = 'summary' WHERE session_id = $1 AND root_hash = $2 AND kind = 'main'`,
+		sessionID, rootHash)
+	return err
+}
+
 func (s *pgIndexStore) updateLink(ctx context.Context, r *ExchangeRow) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE trajectory_exchanges SET parent_id = $2, edge = $3, match_level = $4, prefix_messages = $5
 WHERE exchange_id = $1`, r.ExchangeID, r.ParentID, r.Edge, r.MatchLevel, r.PrefixMessages)

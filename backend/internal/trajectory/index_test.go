@@ -162,6 +162,17 @@ func (m *memIndexStore) latestMainBefore(_ context.Context, session string, befo
 	return &cp, nil
 }
 
+func (m *memIndexStore) markSummaries(_ context.Context, session, root string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, r := range m.rows {
+		if r.SessionID == session && r.RootHash == root && r.Kind == KindMain {
+			r.Kind = KindSummary
+		}
+	}
+	return nil
+}
+
 func (m *memIndexStore) updateLink(_ context.Context, u *ExchangeRow) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -240,6 +251,9 @@ func newTraj(t *testing.T) *traj {
 
 	var current string
 	fake := &fakeUpstream{respond: func(*http.Request) (*http.Response, error) {
+		if current == "502" { // 模拟上游失败
+			return textResponse(502, "application/json", `{"error":{"message":"upstream unavailable"}}`), nil
+		}
 		return textResponse(200, "text/event-stream", current), nil
 	}}
 	up := WrapHTTPUpstream(fake, rec)
@@ -268,10 +282,15 @@ func (tr *traj) send(tag, hint, input, output string, extra ...string) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "Oh-My-Pi/18")
+	if output == "502" {
+		sse = "502"
+	}
 	req.Header.Set("X-Test-Response", sse)
 	w := httptest.NewRecorder()
 	tr.engine.ServeHTTP(w, req)
-	require.Equal(tr.t, http.StatusOK, w.Code)
+	if output != "502" {
+		require.Equal(tr.t, http.StatusOK, w.Code)
+	}
 	tr.rec.Flush()
 	rows := tr.store.all()
 	tr.ids[tag] = rows[len(rows)-1].ExchangeID
@@ -422,6 +441,8 @@ func TestIndexLinksDetachedSummaryCallIntoMainPath(t *testing.T) {
 	tr.instructions = "Summarize user-AI coding-assistant conversations."
 	tr.send("summary", "sess", arr(`{"role":"user","content":"<conversation>hi there ... There is src/.</conversation>"}`),
 		arr(fmt.Sprintf(`{"type":"message","role":"assistant","content":[{"type":"output_text","text":%q}]}`, summary)))
+	tr.send("side-summary", "sess", arr(`{"role":"user","content":"<conversation>only the tail</conversation>"}`),
+		arr(`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"A short recap that nobody uses."}]}`))
 	tr.instructions = "sys"
 	tr.send("after", "sess", arr(fmt.Sprintf(`{"role":"user","content":%q}`, "Prior model work available.\n<summary>\n"+summary+"\n</summary>"), `{"role":"user","content":"what were the counts?"}`), arr(a1))
 	tr.send("after2", "sess", arr(fmt.Sprintf(`{"role":"user","content":%q}`, "Prior model work available.\n<summary>\n"+summary+"\n</summary>"), `{"role":"user","content":"what were the counts?"}`, a1, u2b), arr(a2))
@@ -430,6 +451,8 @@ func TestIndexLinksDetachedSummaryCallIntoMainPath(t *testing.T) {
 	tr.requireEdge("summary", "t2", EdgeSummarize, "session", 0)
 	tr.requireEdge("after2", "after", EdgeContinue, "exact", 3)
 	require.Equal(t, KindCompactionRequest, tr.row("summary").Kind)
+	require.Equal(t, KindSummary, tr.row("side-summary").Kind, "other calls with the summarizer system are side summaries")
+	require.Equal(t, KindMain, tr.row("t2").Kind)
 }
 
 func TestIndexRelinksChildIndexedBeforeLateParent(t *testing.T) {
@@ -488,4 +511,27 @@ func TestIndexRelinkKeepsExistingContinue(t *testing.T) {
 	ix := newIndexer(tr.store, tr.rec.Root())
 	require.NoError(t, ix.relinkInFlight(ctx, late))
 	tr.requireEdge("t2", "t1", EdgeContinue, "exact", 2)
+}
+
+// 上游连接超时：sub2api 回 502，omp 原样重发；成功之前的每次都是 error，重发判为 retry。
+func TestIndexUpstreamFailuresAndResends(t *testing.T) {
+	tr := newTraj(t)
+	tr.send("t1", "sess", arr(u1), arr(a1))
+	tr.send("fail1", "sess", arr(u1, a1, u2), "502")
+	tr.send("fail2", "sess", arr(u1, a1, u2), "502")
+	tr.send("ok", "sess", arr(u1, a1, u2), arr(a2))
+	tr.send("next", "sess", arr(u1, a1, u2, a2, u2b), arr(a1))
+
+	require.Equal(t, StatusError, tr.row("fail1").Status)
+	require.Equal(t, StatusError, tr.row("fail2").Status)
+	require.Equal(t, StatusComplete, tr.row("ok").Status)
+	tr.requireEdge("fail1", "t1", EdgeContinue, "exact", 2)
+	tr.requireEdge("fail2", "fail1", EdgeRetry, "exact", 3)
+	tr.requireEdge("ok", "fail2", EdgeRetry, "exact", 3)
+	tr.requireEdge("next", "ok", EdgeContinue, "exact", 4)
+
+	dir := filepath.Join(tr.rec.Root(), filepath.FromSlash(tr.row("fail1").RawPath))
+	m, err := loadMetaFile(dir)
+	require.NoError(t, err)
+	require.Equal(t, StatusError, m.Status, "finalize writes error when no attempt succeeded")
 }

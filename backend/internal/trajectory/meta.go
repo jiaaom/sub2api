@@ -10,7 +10,7 @@ const (
 	StatusInProgress = "in_progress" // 仅出现在 spool 中
 	StatusComplete   = "complete"
 	StatusIncomplete = "incomplete" // 数据可能不完整：客户端断开、上游中断、进程崩溃后恢复、被强制落定
-	StatusError      = "error"      // handler panic
+	StatusError      = "error"      // handler panic，或者没有任何一次上游 attempt 成功（如上游连接超时、全部 4xx/5xx）
 )
 
 // Attempt 结果。

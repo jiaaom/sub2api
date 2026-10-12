@@ -121,7 +121,7 @@ export default {
         compaction: 'summary of #{n}',
         summarize: 'summarizes #{n}',
       },
-      kind: { main: 'main', compaction_request: 'compaction request', count_tokens: 'count tokens' },
+      kind: { main: 'main', compaction_request: 'compaction request', summary: 'side summary', count_tokens: 'count tokens' },
       roles: { system: 'system', developer: 'developer', user: 'user', assistant: 'assistant', tool: 'tool' },
       block: { thinking: 'Reasoning', encrypted: 'Encrypted reasoning ({bytes} bytes)', toolCall: 'Tool call', toolResult: 'Tool result', toolError: 'Tool error', image: 'Image' },
     },

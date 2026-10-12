@@ -351,6 +351,9 @@ func (ex *Exchange) finalize() {
 			m.Truncated = true
 		}
 	}
+	if m.Status == StatusComplete && m.FinalAttempt == nil && len(m.Attempts) > 0 {
+		m.Status = StatusError
+	}
 	ex.mu.Unlock()
 
 	m.Client.Stream = requestWantsStream(m.Client.Protocol, m.Client.Path, m.Client.Query, ex.clientReq)

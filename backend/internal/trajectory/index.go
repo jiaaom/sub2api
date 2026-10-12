@@ -17,7 +17,7 @@ import (
 
 // IndexRulesVersion 串联 / 分类规则版本。改动 index*.go 或 ir/canon.go 的判定逻辑时 +1，
 // 启动后会自动清空索引并从 raw/ 全量重建。
-const IndexRulesVersion = 3
+const IndexRulesVersion = 4
 
 const (
 	EdgeRoot       = "root"
@@ -33,6 +33,8 @@ const (
 	KindMain              = "main"
 	KindCompactionRequest = "compaction_request"
 	KindCountTokens       = "count_tokens"
+	// KindSummary 与压缩请求同一个总结用 system（同 h0）、但输出没被新根用到的旁路总结调用（omp 每次压缩会发 2–3 个）。
+	KindSummary = "summary"
 
 	indexQueueSize        = 4096
 	compactionMinTextLen  = 200
@@ -131,6 +133,8 @@ type indexStore interface {
 	startedBetween(ctx context.Context, userID int64, after, until time.Time, excludeID string) ([]ExchangeRow, error)
 	// latestMainBefore 会话中 before 之前最近的 main exchange，且 h0 与 excludeRoot 不同。
 	latestMainBefore(ctx context.Context, sessionID string, before time.Time, excludeRoot string) (*ExchangeRow, error)
+	// markSummaries 把会话中与压缩请求同 h0 的其它 main exchange 标为 summary。
+	markSummaries(ctx context.Context, sessionID, rootHash string) error
 	// updateLink 只更新串联字段：parent_id / edge / match_level / prefix_messages。
 	updateLink(ctx context.Context, row *ExchangeRow) error
 	existingIDs(ctx context.Context, ids []string) (map[string]bool, error)
@@ -436,8 +440,21 @@ func (ix *Indexer) afterLink(ctx context.Context, row *ExchangeRow) error {
 		return err
 	}
 	req, err := ix.store.getExchange(ctx, *row.ParentID)
-	if err != nil || req == nil || req.ParentID != nil || req.SessionHint == "" {
+	if err != nil || req == nil {
 		return err
+	}
+	// 只有“独立发出”的压缩请求（自己是根、h0 与主线不同）才有旁路总结调用；
+	// Claude Code 式的压缩请求接在主线后面，与主线同 h0，不能据此改主线的 kind。
+	if (req.ParentID != nil && req.Edge != EdgeSummarize) || req.SessionHint == "" {
+		return nil
+	}
+	if req.RootHash != "" {
+		if err := ix.store.markSummaries(ctx, req.SessionID, req.RootHash); err != nil {
+			return err
+		}
+	}
+	if req.ParentID != nil {
+		return nil
 	}
 	src, err := ix.store.latestMainBefore(ctx, req.SessionID, req.StartedAt, req.RootHash)
 	if err != nil || src == nil {
@@ -504,7 +521,7 @@ func rowFromMeta(m *Meta, rel string) *ExchangeRow {
 		UserID:             m.UserID,
 		APIKeyID:           m.APIKeyID,
 		GroupID:            m.GroupID,
-		Status:             m.Status,
+		Status:             effectiveStatus(m),
 		StatusCode:         m.Client.StatusCode,
 		ClientPath:         m.Client.Path,
 		ClientProtocol:     m.Client.Protocol,
@@ -525,6 +542,14 @@ func rowFromMeta(m *Meta, rel string) *ExchangeRow {
 		row.SessionID = "h" + ir.HashString(fmt.Sprintf("%d\x00%s\x00%s", m.UserID, h.Source, h.Value))
 	}
 	return row
+}
+
+// effectiveStatus 早期落盘的 meta 在“没有任何 attempt 成功”时仍写 complete（raw 只追加不改），索引里按 error 计。
+func effectiveStatus(m *Meta) string {
+	if m.Status == StatusComplete && m.FinalAttempt == nil && len(m.Attempts) > 0 {
+		return StatusError
+	}
+	return m.Status
 }
 
 func firstNonEmpty(vals ...string) string {
@@ -617,6 +642,10 @@ func (ix *Indexer) linkByPrefix(ctx context.Context, row *ExchangeRow, chains []
 			for _, viaHead := range []bool{true, false} {
 				h := c.Req
 				if viaHead {
+					// 没有响应（上游失败）时 head == req，按请求链尾处理，这样同样的重发会判为 retry 而不是 continue。
+					if c.Head == c.Req {
+						continue
+					}
 					h = c.Head
 				}
 				p, ok := pos[h]

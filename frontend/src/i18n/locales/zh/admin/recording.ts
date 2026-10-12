@@ -121,7 +121,7 @@ export default {
         compaction: '#{n} 的摘要',
         summarize: '总结 #{n}',
       },
-      kind: { main: '主线', compaction_request: '压缩请求', count_tokens: '计数 token' },
+      kind: { main: '主线', compaction_request: '压缩请求', summary: '旁路摘要', count_tokens: '计数 token' },
       roles: { system: 'system', developer: 'developer', user: 'user', assistant: 'assistant', tool: 'tool' },
       block: { thinking: '思考过程', encrypted: '加密的思考过程（{bytes} 字节）', toolCall: '工具调用', toolResult: '工具结果', toolError: '工具出错', image: '图片' },
     },
