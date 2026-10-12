@@ -17,7 +17,7 @@ import (
 
 // IndexRulesVersion 串联 / 分类规则版本。改动 index*.go 或 ir/canon.go 的判定逻辑时 +1，
 // 启动后会自动清空索引并从 raw/ 全量重建。
-const IndexRulesVersion = 2
+const IndexRulesVersion = 3
 
 const (
 	EdgeRoot       = "root"
@@ -122,7 +122,8 @@ type indexStore interface {
 	upsertSession(ctx context.Context, row *ExchangeRow) error
 	findByResponseID(ctx context.Context, userID int64, responseID string) (*ExchangeRow, error)
 	findCandidates(ctx context.Context, userID int64, before time.Time, excludeID string, level int, hashes []string) ([]linkCandidate, error)
-	countChildren(ctx context.Context, parentID, edge string) (int, error)
+	// countChildren 不计 excludeID 自身（重新串联已入库的行时，它可能已经是该父节点的子节点）。
+	countChildren(ctx context.Context, parentID, edge, excludeID string) (int, error)
 	compactionCandidates(ctx context.Context, userID int64, sessionID string, since, before time.Time, limit int) ([]ExchangeRow, error)
 	setKind(ctx context.Context, exchangeID, kind string) error
 	getExchange(ctx context.Context, exchangeID string) (*ExchangeRow, error)
@@ -644,7 +645,7 @@ func (ix *Indexer) linkByPrefix(ctx context.Context, row *ExchangeRow, chains []
 	last := len(chains[b.level].Hashes) - 1
 	switch {
 	case b.head:
-		n, err := ix.store.countChildren(ctx, parentID, EdgeContinue)
+		n, err := ix.store.countChildren(ctx, parentID, EdgeContinue, row.ExchangeID)
 		if err != nil {
 			return err
 		}

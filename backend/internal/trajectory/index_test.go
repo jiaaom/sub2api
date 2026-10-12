@@ -84,12 +84,12 @@ func (m *memIndexStore) findCandidates(_ context.Context, userID int64, before t
 	return out, nil
 }
 
-func (m *memIndexStore) countChildren(_ context.Context, parent, edge string) (int, error) {
+func (m *memIndexStore) countChildren(_ context.Context, parent, edge, exclude string) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	n := 0
 	for _, r := range m.rows {
-		if r.ParentID != nil && *r.ParentID == parent && r.Edge == edge {
+		if r.ParentID != nil && *r.ParentID == parent && r.Edge == edge && r.ExchangeID != exclude {
 			n++
 		}
 	}
@@ -468,4 +468,24 @@ func TestIndexRelinksChildIndexedBeforeLateParent(t *testing.T) {
 	require.Equal(t, want["t2"].ExchangeID, *after.ParentID, "relinked once the late parent is indexed")
 	require.Equal(t, EdgeBranch, after.Edge)
 	require.Equal(t, 3, after.PrefixMessages)
+}
+
+// 并行的另一个任务里有个长 exchange：它入索引时会重新串联本会话里已入库的 continue，结果不能变成 branch。
+func TestIndexRelinkKeepsExistingContinue(t *testing.T) {
+	tr := newTraj(t)
+	tr.send("t1", "sess", arr(u1), arr(a1))
+	tr.send("t2", "sess", arr(u1, a1, u2), arr(a2))
+	tr.send("other", "other-task", arr(`{"role":"user","content":"long running elsewhere"}`), arr(a1))
+	ctx := context.Background()
+	other := tr.row("other")
+	dir := filepath.Join(tr.rec.Root(), filepath.FromSlash(other.RawPath))
+	meta, err := loadMetaFile(dir)
+	require.NoError(t, err)
+	late := rowFromMeta(meta, other.RawPath)
+	late.StartedAt = tr.row("t1").StartedAt.Add(-time.Second)
+	f := tr.row("t2").StartedAt.Add(time.Second)
+	late.FinishedAt = &f
+	ix := newIndexer(tr.store, tr.rec.Root())
+	require.NoError(t, ix.relinkInFlight(ctx, late))
+	tr.requireEdge("t2", "t1", EdgeContinue, "exact", 2)
 }

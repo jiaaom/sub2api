@@ -325,13 +325,15 @@ func TestOmpE2E(t *testing.T) {
 			}
 			t.Logf("omp %s → %s %q: %d exchanges, trunk %d, edges %v, thinking omp=%d recorded=%d",
 				ompID, sid, sess.Title, len(rows), len(tr), edges, ompThinking, ourThinking)
-			// 录制比 omp 日志更忠实的两处（模型确实看到了，但 omp 不写进会话日志）：
+			// 录制比 omp 日志更忠实的几处（模型确实看到了，但 omp 不以消息形式写进会话日志）：
 			//   - 中断后 omp 注入一条 “You were saying this but I interrupted you: …” 用户消息；
+			//   - 后台任务完成时注入 “<system-notice> Background job … has completed …” 用户消息；
 			//   - 无事发生的工具结果在日志里写成 “[Uneventful result elided]”，实际发给模型的是全文。
 			injected := 0
 			filtered := got[:0:0]
 			for _, g := range got {
-				if g.Kind == "user" && strings.HasPrefix(strings.TrimSpace(g.Text), "You were saying this but I interrupted you") {
+				if g.Kind == "user" && (strings.HasPrefix(strings.TrimSpace(g.Text), "You were saying this but I interrupted you") ||
+					strings.HasPrefix(strings.TrimSpace(g.Text), "<system-notice>")) {
 					injected++
 					continue
 				}

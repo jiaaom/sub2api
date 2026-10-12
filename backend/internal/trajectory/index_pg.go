@@ -125,9 +125,10 @@ WHERE user_id = $1 AND started_at <= $2 AND exchange_id <> $3 AND (%[1]s = ANY($
 	return out, rows.Err()
 }
 
-func (s *pgIndexStore) countChildren(ctx context.Context, parentID, edge string) (int, error) {
+func (s *pgIndexStore) countChildren(ctx context.Context, parentID, edge, excludeID string) (int, error) {
 	var n int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM trajectory_exchanges WHERE parent_id = $1 AND edge = $2`, parentID, edge).Scan(&n)
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM trajectory_exchanges WHERE parent_id = $1 AND edge = $2 AND exchange_id <> $3`,
+		parentID, edge, excludeID).Scan(&n)
 	return n, err
 }
 
