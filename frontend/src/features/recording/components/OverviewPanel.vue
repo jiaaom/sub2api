@@ -47,6 +47,17 @@
       </div>
     </dl>
 
+    <div v-if="status?.available" class="mt-3 flex flex-wrap items-center gap-3 text-xs text-gray-500 dark:text-dark-400" data-test="index-status">
+      <template v-if="status.index">
+        <span>{{ t('admin.recording.index.summary', { indexed: status.index.indexed, queue: status.index.queue, failed: status.index.failed, dropped: status.index.dropped }) }}</span>
+        <span v-if="status.index.rebuilding" class="text-amber-600 dark:text-amber-300">{{ t('admin.recording.index.rebuilding') }}</span>
+        <button type="button" class="text-primary-600 hover:underline dark:text-primary-400" :disabled="status.index.rebuilding" data-test="reindex" @click="$emit('reindex')">
+          {{ t('admin.recording.index.rebuild') }}
+        </button>
+      </template>
+      <span v-else>{{ t('admin.recording.index.unavailable') }}</span>
+    </div>
+
     <div class="mt-8 flex flex-wrap items-end justify-between gap-2">
       <div>
         <h3 class="text-sm font-semibold text-gray-950 dark:text-white">{{ t('admin.recording.exchanges.title') }}</h3>
@@ -125,7 +136,7 @@ const props = defineProps<{
   loading: boolean
   error: string
 }>()
-defineEmits<{ (e: 'refresh'): void; (e: 'open-scopes'): void; (e: 'copy-path', path: string): void }>()
+defineEmits<{ (e: 'refresh'): void; (e: 'open-scopes'): void; (e: 'copy-path', path: string): void; (e: 'reindex'): void }>()
 
 const { t } = useI18n()
 

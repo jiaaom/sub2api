@@ -5,14 +5,22 @@ import RecordingView from '../RecordingView.vue'
 
 const mocks = vi.hoisted(() => ({
   getStatus: vi.fn(), getScopes: vi.fn(), updateScope: vi.fn(), listExchanges: vi.fn(),
+  listSessions: vi.fn(), getSession: vi.fn(), getExchange: vi.fn(), getRaw: vi.fn(), downloadSession: vi.fn(), reindex: vi.fn(),
   showSuccess: vi.fn(), showError: vi.fn(),
+  route: { query: {} as Record<string, string> },
+  push: vi.fn(), replace: vi.fn(), back: vi.fn(),
+}))
+
+vi.mock('vue-router', () => ({
+  useRoute: () => mocks.route,
+  useRouter: () => ({ push: mocks.push, replace: mocks.replace, back: mocks.back }),
 }))
 
 vi.mock('../api', () => ({ default: mocks }))
 vi.mock('@/stores/app', () => ({ useAppStore: () => ({ showSuccess: mocks.showSuccess, showError: mocks.showError }) }))
 vi.mock('vue-i18n', async () => {
   const actual = await vi.importActual<typeof import('vue-i18n')>('vue-i18n')
-  return { ...actual, useI18n: () => ({ locale: { value: 'en' }, t: (key: string) => key }) }
+  return { ...actual, useI18n: () => ({ locale: { value: 'en' }, t: (key: string) => key, te: () => false }) }
 })
 
 const status = (): RecordingStatus => ({
@@ -39,6 +47,8 @@ function mountView() {
 describe('RecordingView', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mocks.route.query = {}
+    mocks.listSessions.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 30, pages: 0 })
     mocks.getStatus.mockResolvedValue(status())
     mocks.getScopes.mockResolvedValue(scopes())
     mocks.listExchanges.mockResolvedValue({
@@ -118,5 +128,46 @@ describe('RecordingView', () => {
     await wrapper.find('[data-test="group-toggle-2"]').trigger('click')
     await flushPromises()
     expect(mocks.showError).toHaveBeenCalledWith('boom')
+  })
+})
+
+describe('RecordingView sessions and replay', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mocks.route.query = {}
+    mocks.getStatus.mockResolvedValue(status())
+    mocks.getScopes.mockResolvedValue(scopes())
+    mocks.listExchanges.mockResolvedValue({ items: [], has_more: false })
+  })
+
+  it('lists sessions lazily and opens one through the query string', async () => {
+    mocks.listSessions.mockResolvedValue({
+      items: [{ session_id: 'hf01', user_id: 1, hint_source: 'body:prompt_cache_key', hint: '01a1', detected_client: 'oh-my-pi', first_at: '2026-10-12T03:07:42Z', last_at: '2026-10-12T03:11:59Z', exchanges: 3, input_tokens: 56773, output_tokens: 499, cache_read_tokens: 0, last_model: 'deepseek-v4-flash', max_messages: 10, title: '你好' }],
+      total: 1, page: 1, page_size: 30, pages: 1,
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    expect(mocks.listSessions).not.toHaveBeenCalled()
+    await wrapper.find('[data-test="tab-sessions"]').trigger('click')
+    await flushPromises()
+    expect(mocks.replace).toHaveBeenCalledWith({ query: { tab: 'sessions' } })
+    expect(mocks.listSessions).toHaveBeenCalledWith({ q: '', client: '', model: '' }, 1, 30)
+    const row = wrapper.find('[data-test="session-row"]')
+    expect(row.text()).toContain('你好')
+    await row.trigger('click')
+    expect(mocks.push).toHaveBeenCalledWith({ query: { tab: 'sessions', session: 'hf01' } })
+  })
+
+  it('renders the replay page when ?session= is present', async () => {
+    mocks.route.query = { tab: 'sessions', session: 'hf01' }
+    mocks.getSession.mockResolvedValue({
+      session: { session_id: 'hf01', user_id: 1, hint_source: '', hint: '', detected_client: 'oh-my-pi', first_at: '2026-10-12T03:07:42Z', last_at: '2026-10-12T03:11:59Z', exchanges: 2, input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, last_model: 'm', max_messages: 5, title: 'hello' },
+      exchanges: [],
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    expect(mocks.getSession).toHaveBeenCalledWith('hf01')
+    expect(wrapper.find('[data-test="session-replay"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="tab-overview"]').exists()).toBe(false)
   })
 })

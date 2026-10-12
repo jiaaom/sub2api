@@ -52,10 +52,10 @@
 - [x] 6.1 `features/recording/` 骨架 + 路由 + 侧栏 + i18n（中英，更新 Hook 清单）
 - [x] 6.2 概览页
 - [x] 6.3 开关页（group / API key 三态）
-- [ ] 6.4 Sessions 列表
-- [ ] 6.5 回放页：DAG 树 + 时间线 + thinking / tool 渲染 + 前缀复用条
-- [ ] 6.6 diff 视图 + 原始 A/B/C/D 查看器
-- [ ] 6.7 下载入口
+- [x] 6.4 Sessions 列表
+- [ ] 6.5 回放页：DAG 树 + 时间线 + thinking / tool 渲染 + 前缀复用条（已完成：主干 / 全部时间线、边类型标注、thinking / tool 渲染、前缀复用条与上游 cache 命中条；待做：DAG 树视图）
+- [ ] 6.6 diff 视图 + 原始 A/B/C/D 查看器（已完成：A/B/C/D 分段查看器；待做：相邻轮 diff）
+- [ ] 6.7 下载入口（已完成：单个 session .tar.zst；待做：按日期范围、IR jsonl）
 - [ ] 6.8 vitest + typecheck + lint
 
 ## 7. 离线工具与收尾
