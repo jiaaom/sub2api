@@ -17,7 +17,7 @@ import (
 
 // IndexRulesVersion 串联 / 分类规则版本。改动 index*.go 或 ir/canon.go 的判定逻辑时 +1，
 // 启动后会自动清空索引并从 raw/ 全量重建。
-const IndexRulesVersion = 1
+const IndexRulesVersion = 2
 
 const (
 	EdgeRoot       = "root"
@@ -26,6 +26,9 @@ const (
 	EdgeRetry      = "retry"      // 与父节点请求完全相同
 	EdgePointer    = "pointer"    // Responses previous_response_id 显式指针
 	EdgeCompaction = "compaction" // 新根的开头包含父节点（压缩请求）的摘要文本
+	// EdgeSummarize 独立发出的压缩请求（omp 等把旧对话拍平成一条消息、另起 system）挂回它所总结的主线 exchange：
+	// 同一会话里在它之前最近的 main exchange（h0 不同）。这样回放主干能穿过压缩点。
+	EdgeSummarize = "summarize"
 
 	KindMain              = "main"
 	KindCompactionRequest = "compaction_request"
@@ -122,6 +125,13 @@ type indexStore interface {
 	countChildren(ctx context.Context, parentID, edge string) (int, error)
 	compactionCandidates(ctx context.Context, userID int64, sessionID string, since, before time.Time, limit int) ([]ExchangeRow, error)
 	setKind(ctx context.Context, exchangeID, kind string) error
+	getExchange(ctx context.Context, exchangeID string) (*ExchangeRow, error)
+	// startedBetween 同一用户在 (after, until] 之间开始的 exchange（按开始时间升序）。
+	startedBetween(ctx context.Context, userID int64, after, until time.Time, excludeID string) ([]ExchangeRow, error)
+	// latestMainBefore 会话中 before 之前最近的 main exchange，且 h0 与 excludeRoot 不同。
+	latestMainBefore(ctx context.Context, sessionID string, before time.Time, excludeRoot string) (*ExchangeRow, error)
+	// updateLink 只更新串联字段：parent_id / edge / match_level / prefix_messages。
+	updateLink(ctx context.Context, row *ExchangeRow) error
 	existingIDs(ctx context.Context, ids []string) (map[string]bool, error)
 	truncate(ctx context.Context) error
 	getState(ctx context.Context, key string) (string, error)
@@ -405,15 +415,83 @@ func (ix *Indexer) indexOne(ctx context.Context, dir string, meta *Meta) error {
 		return err
 	}
 	ix.indexed.Add(1)
-	if row.Edge == EdgeCompaction && row.ParentID != nil {
-		if err := ix.store.setKind(ctx, *row.ParentID, KindCompactionRequest); err != nil {
+	if err := ix.afterLink(ctx, row); err != nil {
+		return err
+	}
+	if row.Kind != KindCountTokens {
+		if err := ix.store.upsertSession(ctx, row); err != nil {
 			return err
 		}
 	}
-	if row.Kind == KindCountTokens {
+	return ix.relinkInFlight(ctx, row)
+}
+
+// afterLink 串联确定后的连带更新：compaction 边把父节点标为压缩请求，并把独立发出的压缩请求挂回主线。
+func (ix *Indexer) afterLink(ctx context.Context, row *ExchangeRow) error {
+	if row.Edge != EdgeCompaction || row.ParentID == nil {
 		return nil
 	}
-	return ix.store.upsertSession(ctx, row)
+	if err := ix.store.setKind(ctx, *row.ParentID, KindCompactionRequest); err != nil {
+		return err
+	}
+	req, err := ix.store.getExchange(ctx, *row.ParentID)
+	if err != nil || req == nil || req.ParentID != nil || req.SessionHint == "" {
+		return err
+	}
+	src, err := ix.store.latestMainBefore(ctx, req.SessionID, req.StartedAt, req.RootHash)
+	if err != nil || src == nil {
+		return err
+	}
+	req.ParentID = &src.ExchangeID
+	req.Edge, req.MatchLevel, req.PrefixMessages = EdgeSummarize, "session", 0
+	return ix.store.updateLink(ctx, req)
+}
+
+// relinkInFlight 处理“父节点比子节点晚落定”：客户端中途断开后 sub2api 仍会把上游流读完，
+// 这期间客户端发出的后续请求先落定、先入索引，当时找不到父节点。
+// 一个 exchange 入索引后，重新串联在它进行期间开始的 exchange；结果有变化才更新。
+func (ix *Indexer) relinkInFlight(ctx context.Context, late *ExchangeRow) error {
+	if late.FinishedAt == nil || late.FinishedAt.Sub(late.StartedAt) <= 0 {
+		return nil
+	}
+	rows, err := ix.store.startedBetween(ctx, late.UserID, late.StartedAt, *late.FinishedAt, late.ExchangeID)
+	if err != nil {
+		return err
+	}
+	for i := range rows {
+		old := &rows[i]
+		dir := filepath.Join(ix.root, filepath.FromSlash(old.RawPath))
+		meta, err := loadMetaFile(dir)
+		if err != nil {
+			continue
+		}
+		p := parseExchange(dir, meta)
+		if p.req == nil {
+			continue
+		}
+		fresh := rowFromMeta(meta, old.RawPath)
+		fresh.SessionID = old.SessionID
+		if err := ix.link(ctx, fresh, p.req, p.resp); err != nil {
+			return err
+		}
+		if equalPtr(fresh.ParentID, old.ParentID) && fresh.Edge == old.Edge && fresh.MatchLevel == old.MatchLevel && fresh.PrefixMessages == old.PrefixMessages {
+			continue
+		}
+		if err := ix.store.updateLink(ctx, fresh); err != nil {
+			return err
+		}
+		if err := ix.afterLink(ctx, fresh); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func equalPtr(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 func rowFromMeta(m *Meta, rel string) *ExchangeRow {

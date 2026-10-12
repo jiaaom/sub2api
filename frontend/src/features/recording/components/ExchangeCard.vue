@@ -170,6 +170,7 @@ const edgeClass = computed(() => {
     case 'retry':
       return 'bg-orange-50 text-orange-700 dark:bg-orange-950/40 dark:text-orange-300'
     case 'compaction':
+    case 'summarize':
       return 'bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300'
     default:
       return 'bg-gray-100 text-gray-600 dark:bg-dark-700 dark:text-dark-300'

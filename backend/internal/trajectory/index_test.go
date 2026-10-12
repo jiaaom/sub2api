@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -119,6 +120,59 @@ func (m *memIndexStore) setKind(_ context.Context, id, kind string) error {
 	return nil
 }
 
+func (m *memIndexStore) getExchange(_ context.Context, id string) (*ExchangeRow, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, r := range m.rows {
+		if r.ExchangeID == id {
+			cp := *r
+			return &cp, nil
+		}
+	}
+	return nil, nil
+}
+
+func (m *memIndexStore) startedBetween(_ context.Context, userID int64, after, until time.Time, exclude string) ([]ExchangeRow, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []ExchangeRow
+	for _, r := range m.rows {
+		if r.UserID == userID && r.ExchangeID != exclude && r.StartedAt.After(after) && !r.StartedAt.After(until) {
+			out = append(out, *r)
+		}
+	}
+	slices.SortFunc(out, func(a, b ExchangeRow) int { return a.StartedAt.Compare(b.StartedAt) })
+	return out, nil
+}
+
+func (m *memIndexStore) latestMainBefore(_ context.Context, session string, before time.Time, excludeRoot string) (*ExchangeRow, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var best *ExchangeRow
+	for _, r := range m.rows {
+		if r.SessionID == session && r.StartedAt.Before(before) && r.Kind == KindMain && r.RootHash != excludeRoot && r.RootHash != "" &&
+			(best == nil || r.StartedAt.After(best.StartedAt)) {
+			best = r
+		}
+	}
+	if best == nil {
+		return nil, nil
+	}
+	cp := *best
+	return &cp, nil
+}
+
+func (m *memIndexStore) updateLink(_ context.Context, u *ExchangeRow) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, r := range m.rows {
+		if r.ExchangeID == u.ExchangeID {
+			r.ParentID, r.Edge, r.MatchLevel, r.PrefixMessages = u.ParentID, u.Edge, u.MatchLevel, u.PrefixMessages
+		}
+	}
+	return nil
+}
+
 func (m *memIndexStore) existingIDs(_ context.Context, ids []string) (map[string]bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -170,10 +224,12 @@ type traj struct {
 	engine *gin.Engine
 	ids    map[string]string // tag → exchange_id
 	clock  time.Time
+	// instructions 请求的 system（Responses instructions），默认 "sys"。
+	instructions string
 }
 
 func newTraj(t *testing.T) *traj {
-	tr := &traj{t: t, store: newMemIndexStore(), ids: map[string]string{}, clock: time.Date(2026, 10, 12, 3, 0, 0, 0, time.UTC)}
+	tr := &traj{t: t, store: newMemIndexStore(), ids: map[string]string{}, clock: time.Date(2026, 10, 12, 3, 0, 0, 0, time.UTC), instructions: "sys"}
 	rec, err := New(Options{Root: t.TempDir(), Now: func() time.Time { return tr.clock }}, nil)
 	require.NoError(t, err)
 	rec.SetScopes(enabledScopes())
@@ -206,8 +262,8 @@ func newTraj(t *testing.T) *traj {
 func (tr *traj) send(tag, hint, input, output string, extra ...string) {
 	tr.t.Helper()
 	tr.clock = tr.clock.Add(time.Minute)
-	body := fmt.Sprintf(`{"model":"m","stream":true,"prompt_cache_key":%q,"instructions":"sys","tools":[{"type":"function","name":"read","parameters":{}}],"input":%s%s}`,
-		hint, input, strings.Join(extra, ""))
+	body := fmt.Sprintf(`{"model":"m","stream":true,"prompt_cache_key":%q,"instructions":%q,"tools":[{"type":"function","name":"read","parameters":{}}],"input":%s%s}`,
+		hint, tr.instructions, input, strings.Join(extra, ""))
 	sse := fmt.Sprintf("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_%s\",\"object\":\"response\",\"status\":\"completed\",\"output\":%s}}\n\n", tag, output)
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -355,4 +411,61 @@ func TestIndexCatchUpAndRebuildFromDisk(t *testing.T) {
 	ix.Flush()
 	ix.Close()
 	require.Len(t, fresh.all(), 3)
+}
+
+func TestIndexLinksDetachedSummaryCallIntoMainPath(t *testing.T) {
+	tr := newTraj(t)
+	summary := strings.Repeat("Goal: count FAILED lines in three logs; each had 193 of 2500. ", 5)
+	tr.send("t1", "sess", arr(u1), arr(a1))
+	tr.send("t2", "sess", arr(u1, a1, u2), arr(a2))
+	// omp 式压缩：另起 system，把旧对话拍平成一条消息
+	tr.instructions = "Summarize user-AI coding-assistant conversations."
+	tr.send("summary", "sess", arr(`{"role":"user","content":"<conversation>hi there ... There is src/.</conversation>"}`),
+		arr(fmt.Sprintf(`{"type":"message","role":"assistant","content":[{"type":"output_text","text":%q}]}`, summary)))
+	tr.instructions = "sys"
+	tr.send("after", "sess", arr(fmt.Sprintf(`{"role":"user","content":%q}`, "Prior model work available.\n<summary>\n"+summary+"\n</summary>"), `{"role":"user","content":"what were the counts?"}`), arr(a1))
+	tr.send("after2", "sess", arr(fmt.Sprintf(`{"role":"user","content":%q}`, "Prior model work available.\n<summary>\n"+summary+"\n</summary>"), `{"role":"user","content":"what were the counts?"}`, a1, u2b), arr(a2))
+
+	tr.requireEdge("after", "summary", EdgeCompaction, "summary", 0)
+	tr.requireEdge("summary", "t2", EdgeSummarize, "session", 0)
+	tr.requireEdge("after2", "after", EdgeContinue, "exact", 3)
+	require.Equal(t, KindCompactionRequest, tr.row("summary").Kind)
+}
+
+func TestIndexRelinksChildIndexedBeforeLateParent(t *testing.T) {
+	tr := newTraj(t)
+	tr.send("t1", "sess", arr(u1), arr(a1))
+	// 客户端在 t2 流式中途断开，随后发了新消息（不带 t2 的半截回答）
+	tr.send("t2", "sess", arr(u1, a1, u2), arr(a2))
+	tr.send("t3", "sess", arr(u1, a1, u2, u2b), arr(a1))
+	want := map[string]ExchangeRow{}
+	for _, tag := range []string{"t1", "t2", "t3"} {
+		want[tag] = tr.row(tag)
+	}
+	require.Equal(t, EdgeBranch, want["t3"].Edge)
+
+	// 重新索引，但 t2 比 t3 晚落定、晚入索引
+	fresh := newMemIndexStore()
+	ix := newIndexer(fresh, tr.rec.Root())
+	ctx := context.Background()
+	index := func(tag string, finishedAfter *time.Time) {
+		dir := filepath.Join(tr.rec.Root(), filepath.FromSlash(want[tag].RawPath))
+		meta, err := loadMetaFile(dir)
+		require.NoError(t, err)
+		if finishedAfter != nil {
+			f := finishedAfter.Add(time.Second)
+			meta.FinishedAt = &f
+		}
+		require.NoError(t, ix.indexOne(ctx, dir, meta))
+	}
+	index("t1", nil)
+	index("t3", nil)
+	before, _ := fresh.getExchange(ctx, want["t3"].ExchangeID)
+	require.Equal(t, want["t1"].ExchangeID, *before.ParentID, "without t2 the best match is t1")
+	t3Start := want["t3"].StartedAt
+	index("t2", &t3Start)
+	after, _ := fresh.getExchange(ctx, want["t3"].ExchangeID)
+	require.Equal(t, want["t2"].ExchangeID, *after.ParentID, "relinked once the late parent is indexed")
+	require.Equal(t, EdgeBranch, after.Edge)
+	require.Equal(t, 3, after.PrefixMessages)
 }

@@ -35,7 +35,7 @@
 - [x] 4.1 规范化 + 前缀哈希链（单测：cache_control 移动、key 重排、thinking 剥离）
 - [x] 4.2 DAG 构建：后续 / 分支 / 宽松匹配等级
 - [x] 4.3 session 归组（hint 优先，DAG 连通分量兜底）
-- [ ] 4.3a （部分完成：摘要内容匹配 + compaction_request 标记；待做：Responses compact item 精确匹配、rewrite 检测、context_management）compaction 串联：摘要内容匹配（Claude Code / pi）+ Responses compact item 精确匹配；rewrite 检测（tool_call id 锚点对齐）；Anthropic `context_management` 的 applied_edits 记录
+- [ ] 4.3a （部分完成：摘要内容匹配 + compaction_request 标记 + 独立总结请求的 summarize 边（omp 已实测）；待做：Responses compact item 精确匹配、rewrite 检测、context_management）compaction 串联：摘要内容匹配（Claude Code / pi）+ Responses compact item 精确匹配；rewrite 检测（tool_call id 锚点对齐）；Anthropic `context_management` 的 applied_edits 记录
 - [ ] 4.4 分类：main / subagent / compaction / auxiliary / count_tokens / warmup
 - [ ] 4.5 生成派生层 `objects/` + `sessions/`（可删除后重建，带规则版本号）
 - [ ] 4.6 用真实 session 校验：本地前缀长度和上游 cache_read 的一致性报告

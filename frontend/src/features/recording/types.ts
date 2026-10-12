@@ -140,7 +140,7 @@ export interface SessionFilters {
   model: string
 }
 
-export type EdgeType = 'root' | 'continue' | 'branch' | 'retry' | 'pointer' | 'compaction'
+export type EdgeType = 'root' | 'continue' | 'branch' | 'retry' | 'pointer' | 'compaction' | 'summarize'
 
 export interface ExchangeRow {
   exchange_id: string

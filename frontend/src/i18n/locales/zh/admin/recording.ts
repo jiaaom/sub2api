@@ -119,6 +119,7 @@ export default {
         retry: '重试 #{n}',
         pointer: 'previous_response_id → #{n}',
         compaction: '#{n} 的摘要',
+        summarize: '总结 #{n}',
       },
       kind: { main: '主线', compaction_request: '压缩请求', count_tokens: '计数 token' },
       roles: { system: 'system', developer: 'developer', user: 'user', assistant: 'assistant', tool: 'tool' },

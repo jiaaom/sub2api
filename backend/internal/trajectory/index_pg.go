@@ -159,6 +159,40 @@ func (s *pgIndexStore) setKind(ctx context.Context, exchangeID, kind string) err
 	return err
 }
 
+func (s *pgIndexStore) startedBetween(ctx context.Context, userID int64, after, until time.Time, excludeID string) ([]ExchangeRow, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+exchangeColumns+` FROM trajectory_exchanges
+WHERE user_id = $1 AND started_at > $2 AND started_at <= $3 AND exchange_id <> $4 ORDER BY started_at`, userID, after, until, excludeID)
+	if err != nil {
+		return nil, fmt.Errorf("find in-flight trajectory exchanges: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []ExchangeRow
+	for rows.Next() {
+		r, err := scanExchange(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *r)
+	}
+	return out, rows.Err()
+}
+
+func (s *pgIndexStore) latestMainBefore(ctx context.Context, sessionID string, before time.Time, excludeRoot string) (*ExchangeRow, error) {
+	r, err := scanExchange(s.db.QueryRowContext(ctx, `SELECT `+exchangeColumns+` FROM trajectory_exchanges
+WHERE session_id = $1 AND started_at < $2 AND kind = 'main' AND root_hash <> $3 AND root_hash <> ''
+ORDER BY started_at DESC LIMIT 1`, sessionID, before, excludeRoot))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return r, err
+}
+
+func (s *pgIndexStore) updateLink(ctx context.Context, r *ExchangeRow) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE trajectory_exchanges SET parent_id = $2, edge = $3, match_level = $4, prefix_messages = $5
+WHERE exchange_id = $1`, r.ExchangeID, r.ParentID, r.Edge, r.MatchLevel, r.PrefixMessages)
+	return err
+}
+
 func (s *pgIndexStore) existingIDs(ctx context.Context, ids []string) (map[string]bool, error) {
 	out := make(map[string]bool, len(ids))
 	if len(ids) == 0 {

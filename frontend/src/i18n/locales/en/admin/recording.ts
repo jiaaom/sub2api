@@ -119,6 +119,7 @@ export default {
         retry: 'retry of #{n}',
         pointer: 'previous_response_id → #{n}',
         compaction: 'summary of #{n}',
+        summarize: 'summarizes #{n}',
       },
       kind: { main: 'main', compaction_request: 'compaction request', count_tokens: 'count tokens' },
       roles: { system: 'system', developer: 'developer', user: 'user', assistant: 'assistant', tool: 'tool' },

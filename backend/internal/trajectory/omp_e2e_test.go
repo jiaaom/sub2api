@@ -77,19 +77,23 @@ func ompConversation(t *testing.T, path string) (string, []atom, int) {
 		if e.ID != "" {
 			entries[e.ID] = e
 		}
-		if e.Type == "message" {
+		if e.Type == "message" || e.Type == "compaction" {
 			last = e.ID
 		}
 	}
 	var path_ []ompEntry
 	for id := last; id != ""; id = entries[id].ParentID {
-		if e := entries[id]; e.Type == "message" {
+		if e := entries[id]; e.Type == "message" || e.Type == "compaction" {
 			path_ = append(path_, e)
 		}
 	}
 	var atoms []atom
 	thinking := 0
 	for i := len(path_) - 1; i >= 0; i-- {
+		if path_[i].Type == "compaction" {
+			atoms = append(atoms, atom{Kind: "compaction"})
+			continue
+		}
 		var m ompMessage
 		require.NoError(t, json.Unmarshal(path_[i].Message, &m))
 		var texts []string
@@ -275,23 +279,66 @@ func TestOmpE2E(t *testing.T) {
 			for _, r := range rows {
 				edges[r.Edge+"/"+r.MatchLevel+"/"+r.Status]++
 			}
-			for _, r := range tr {
+			// 规则（与 omp 日志的语义对齐）：
+			//   - 压缩请求只记一个 compaction 标记；
+			//   - compaction 新根的第一条消息是摘要载体，之后保留的旧消息与已出现的内容重复，均跳过；
+			//   - 某轮的响应只有在下一轮把它带进历史（continue / pointer / summarize）时才算对话的一部分，
+			//     中途中断、被下一轮丢弃的半截回答（branch）不算。
+			seen := map[atom]bool{}
+			for i, r := range tr {
+				if r.Kind == KindCompactionRequest {
+					got = append(got, atom{Kind: "compaction"})
+					continue
+				}
 				dir := filepath.Join(root, filepath.FromSlash(r.RawPath))
 				m, err := loadMetaFile(dir)
 				require.NoError(t, err)
 				p := parseExchange(dir, m)
 				require.NoError(t, p.reqErr)
-				from := displayFromRow(r, byID, visible)
-				a, _ := irAtoms(p.req.Messages[from:])
-				got = append(got, a...)
-				if p.resp != nil {
+				msgs := p.req.Messages[displayFromRow(r, byID, visible):]
+				if r.Edge == EdgeCompaction && len(msgs) > 0 {
+					msgs = msgs[1:]
+				}
+				a, _ := irAtoms(msgs)
+				for _, x := range a {
+					if r.Edge == EdgeCompaction && seen[x] {
+						continue
+					}
+					got = append(got, x)
+					seen[x] = true
+				}
+				carried := i == len(tr)-1
+				if !carried {
+					switch tr[i+1].Edge {
+					case EdgeContinue, EdgePointer, EdgeSummarize:
+						carried = true
+					}
+				}
+				if p.resp != nil && carried {
 					a, th := irAtoms(p.resp.Messages)
-					got = append(got, a...)
+					for _, x := range a {
+						got = append(got, x)
+						seen[x] = true
+					}
 					ourThinking += th
 				}
 			}
 			t.Logf("omp %s → %s %q: %d exchanges, trunk %d, edges %v, thinking omp=%d recorded=%d",
 				ompID, sid, sess.Title, len(rows), len(tr), edges, ompThinking, ourThinking)
+			// 录制比 omp 日志更忠实的两处（模型确实看到了，但 omp 不写进会话日志）：
+			//   - 中断后 omp 注入一条 “You were saying this but I interrupted you: …” 用户消息；
+			//   - 无事发生的工具结果在日志里写成 “[Uneventful result elided]”，实际发给模型的是全文。
+			injected := 0
+			filtered := got[:0:0]
+			for _, g := range got {
+				if g.Kind == "user" && strings.HasPrefix(strings.TrimSpace(g.Text), "You were saying this but I interrupted you") {
+					injected++
+					continue
+				}
+				filtered = append(filtered, g)
+			}
+			got = filtered
+			elided := 0
 			diffs := 0
 			for i := 0; i < max(len(want), len(got)); i++ {
 				var w, g atom
@@ -303,6 +350,10 @@ func TestOmpE2E(t *testing.T) {
 				}
 				same := w.Kind == g.Kind && (strings.TrimSpace(w.Text) == strings.TrimSpace(g.Text) ||
 					(w.Kind == "user" && strings.Contains(g.Text, strings.TrimSpace(w.Text))))
+				if !same && w.Kind == "tool_result" && g.Kind == "tool_result" && strings.TrimSpace(w.Text) == "[Uneventful result elided]" {
+					same = true
+					elided++
+				}
 				if !same {
 					diffs++
 					if diffs <= 8 {
@@ -311,7 +362,7 @@ func TestOmpE2E(t *testing.T) {
 				}
 			}
 			require.Zero(t, diffs, "reconstructed conversation (%d atoms) differs from omp (%d atoms)", len(got), len(want))
-			fmt.Printf("OK %s: %d atoms match\n", ompID, len(want))
+			fmt.Printf("OK %s: %d atoms match (omp-elided tool results: %d, omp-injected interrupt notes: %d)\n", ompID, len(want), elided, injected)
 		})
 	}
 }
