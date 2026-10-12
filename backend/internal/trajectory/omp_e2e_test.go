@@ -47,8 +47,9 @@ type ompEntry struct {
 }
 
 type ompMessage struct {
-	Role    string `json:"role"`
-	Content []struct {
+	Role       string `json:"role"`
+	StopReason string `json:"stopReason"`
+	Content    []struct {
 		Type      string          `json:"type"`
 		Text      string          `json:"text"`
 		Thinking  string          `json:"thinking"`
@@ -58,7 +59,7 @@ type ompMessage struct {
 }
 
 // ompConversation omp 会话：session id 与从最后一条消息回溯到根的消息路径。
-func ompConversation(t *testing.T, path string) (string, []atom, int) {
+func ompConversation(t *testing.T, path string) (string, []atom, int, bool) {
 	f, err := os.Open(path)
 	require.NoError(t, err)
 	defer func() { _ = f.Close() }()
@@ -89,6 +90,7 @@ func ompConversation(t *testing.T, path string) (string, []atom, int) {
 	}
 	var atoms []atom
 	thinking := 0
+	lastAborted := false
 	for i := len(path_) - 1; i >= 0; i-- {
 		if path_[i].Type == "compaction" {
 			atoms = append(atoms, atom{Kind: "compaction"})
@@ -96,6 +98,9 @@ func ompConversation(t *testing.T, path string) (string, []atom, int) {
 		}
 		var m ompMessage
 		require.NoError(t, json.Unmarshal(path_[i].Message, &m))
+		if i == 0 {
+			lastAborted = m.Role == "assistant" && m.StopReason == "aborted"
+		}
 		var texts []string
 		for _, c := range m.Content {
 			switch c.Type {
@@ -125,7 +130,7 @@ func ompConversation(t *testing.T, path string) (string, []atom, int) {
 			atoms = append(atoms, atom{Kind: "tool_result", Text: strings.Join(texts, "\n")})
 		}
 	}
-	return sessionID, atoms, thinking
+	return sessionID, atoms, thinking, lastAborted
 }
 
 func canonArgs(raw json.RawMessage) string {
@@ -279,7 +284,7 @@ func TestOmpE2E(t *testing.T) {
 	sort.Strings(files)
 	require.NotEmpty(t, files)
 	for _, file := range files {
-		ompID, want, ompThinking := ompConversation(t, file)
+		ompID, want, ompThinking, lastAborted := ompConversation(t, file)
 		t.Run(filepath.Base(file), func(t *testing.T) {
 			var sid string
 			err := db.QueryRow(`SELECT session_id FROM trajectory_sessions WHERE hint = $1`, ompID).Scan(&sid)
@@ -340,7 +345,16 @@ func TestOmpE2E(t *testing.T) {
 				// 以子节点共享前缀是否超过父节点请求长度来判断。
 				carried := i == len(tr)-1
 				if !carried {
-					switch next := tr[i+1]; next.Edge {
+					// 下一行若是 retry，取它所代替的那一轮（被隐藏的被重试者）的边来判断。
+					next := tr[i+1]
+					for next.Edge == EdgeRetry && next.ParentID != nil && !visible[*next.ParentID] {
+						p, ok := byID[*next.ParentID]
+						if !ok {
+							break
+						}
+						next = p
+					}
+					switch next.Edge {
 					case EdgeContinue, EdgePointer, EdgeSummarize:
 						carried = true
 					case EdgeBranch:
@@ -403,9 +417,15 @@ func TestOmpE2E(t *testing.T) {
 					t.Error(r)
 				}
 			}
+			// 用户中断时 omp 只保存了已流到客户端的部分（stopReason=aborted），而 sub2api 会把上游读完：
+			// 录制末尾多出的内容（如没来得及执行的 tool_call）是模型真实输出，视为一致。
+			beyond := 0
+			if diffs > 0 && lastAborted && len(got) > len(want) && diffs == len(got)-len(want) {
+				beyond, diffs = diffs, 0
+			}
 			require.Zero(t, diffs, "reconstructed conversation (%d atoms) differs from omp (%d atoms)", len(got), len(want))
-			fmt.Printf("OK %s: %d atoms match (omp-elided tool results: %d, omp-injected notes: %d, recap calls: %d, not yet sent: %d)\n",
-				ompID, len(got), elided, injected, recaps, pending)
+			fmt.Printf("OK %s: %d atoms match (omp-elided tool results: %d, omp-injected notes: %d, recap calls: %d, not yet sent: %d, beyond aborted omp tail: %d)\n",
+				ompID, len(got), elided, injected, recaps, pending, beyond)
 		})
 	}
 }
