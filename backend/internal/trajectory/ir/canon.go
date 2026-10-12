@@ -79,6 +79,9 @@ func Extend(base Chain, msgs []Message, offset int, level Level) Chain {
 	return out
 }
 
+// HashString 128 位 sha256 前缀（32 位十六进制），用于派生稳定 id。
+func HashString(s string) string { return hashHex([]byte(s)) }
+
 func hashHex(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:16])

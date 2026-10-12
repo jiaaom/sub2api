@@ -357,12 +357,16 @@ func (ex *Exchange) finalize() {
 	m.Client.SessionHint = detectSessionHint(m.Client.Headers, ex.clientReq)
 	m.Model.Requested = requestedModel(m.Client.Protocol, m.Client.Path, ex.clientReq)
 	summarizeExchange(ex.dir, m)
-	if _, err := ex.rec.store.commit(ex.dir, m); err != nil {
+	rel, err := ex.rec.store.commit(ex.dir, m)
+	if err != nil {
 		ex.rec.fail("commit exchange", err)
 		slog.Error("trajectory: commit exchange failed", "exchange_id", ex.id, "error", err)
 		return
 	}
 	ex.rec.stats.exchangesFinalized.Add(1)
+	if ix := ex.rec.indexer.Load(); ix != nil {
+		ix.Enqueue(filepath.Join(ex.rec.opts.Root, rel), m)
+	}
 }
 
 // beginAttempt B：记录发往上游的请求。返回 nil 表示不录。

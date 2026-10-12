@@ -24,6 +24,9 @@ func ProvideRecorder(repo ScopeRepository) *Recorder {
 		return nil
 	}
 	rec.Start()
+	if pg, ok := repo.(*PostgresScopeRepository); ok && pg != nil && pg.db != nil {
+		rec.SetIndexer(newIndexer(&pgIndexStore{db: pg.db}, rec.Root()))
+	}
 	SetDefault(rec)
 	slog.Info("trajectory: recorder ready", "root", rec.Root(), "global_enabled", rec.Stats().GlobalEnabled)
 	return rec

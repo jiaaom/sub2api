@@ -29,8 +29,24 @@ type Recorder struct {
 	wg       sync.WaitGroup
 	pending  inflight // 异步收尾 / 落定中的任务数
 
+	// indexer 落定后的 exchange 交给它建 PG 索引（无数据库时为 nil）。
+	indexer atomic.Pointer[Indexer]
+
 	stats recorderCounters
 }
+
+// SetIndexer 设置并启动索引器（替换时关闭旧的）。
+func (r *Recorder) SetIndexer(ix *Indexer) {
+	if ix != nil {
+		ix.Start()
+	}
+	if old := r.indexer.Swap(ix); old != nil {
+		old.Close()
+	}
+}
+
+// Indexer 当前索引器，可能为 nil。
+func (r *Recorder) Indexer() *Indexer { return r.indexer.Load() }
 
 type recorderCounters struct {
 	exchangesStarted   atomic.Int64
@@ -114,10 +130,18 @@ func (r *Recorder) Close() {
 	r.stopOnce.Do(func() { close(r.stop) })
 	r.wg.Wait()
 	r.pending.Wait()
+	if ix := r.indexer.Swap(nil); ix != nil {
+		ix.Close()
+	}
 }
 
-// Flush 等待所有已结束的 exchange 完成异步落定（测试与关停使用）。
-func (r *Recorder) Flush() { r.pending.Wait() }
+// Flush 等待所有已结束的 exchange 完成异步落定与索引（测试与关停使用）。
+func (r *Recorder) Flush() {
+	r.pending.Wait()
+	if ix := r.indexer.Load(); ix != nil {
+		ix.Flush()
+	}
+}
 
 func (r *Recorder) loop() {
 	defer r.wg.Done()
