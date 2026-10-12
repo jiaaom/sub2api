@@ -84,3 +84,56 @@ func validateScope(scopeType ScopeType, id int64) error {
 	}
 	return nil
 }
+
+// ListTargets 列出未删除的分组和 API key（只读上游表的稳定列：id / name / status / platform / group_id / user_id / email）。
+func (r *PostgresScopeRepository) ListTargets(ctx context.Context) (*ScopeTargets, error) {
+	if r == nil || r.db == nil {
+		return nil, errScopeDBUnavailable
+	}
+	out := &ScopeTargets{Groups: []GroupTarget{}, APIKeys: []APIKeyTarget{}}
+	rows, err := r.db.QueryContext(ctx, `
+SELECT id, name, platform, status FROM groups WHERE deleted_at IS NULL ORDER BY sort_order, id`)
+	if err != nil {
+		return nil, fmt.Errorf("list groups: %w", err)
+	}
+	for rows.Next() {
+		var g GroupTarget
+		if err := rows.Scan(&g.ID, &g.Name, &g.Platform, &g.Status); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("scan group: %w", err)
+		}
+		out.Groups = append(out.Groups, g)
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list groups: %w", err)
+	}
+
+	rows, err = r.db.QueryContext(ctx, `
+SELECT k.id, k.name, k.status, k.user_id, COALESCE(u.email, ''), k.group_id, COALESCE(g.name, '')
+FROM api_keys k
+LEFT JOIN users u ON u.id = k.user_id
+LEFT JOIN groups g ON g.id = k.group_id AND g.deleted_at IS NULL
+WHERE k.deleted_at IS NULL
+ORDER BY k.user_id, k.id`)
+	if err != nil {
+		return nil, fmt.Errorf("list api keys: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var k APIKeyTarget
+		var groupID sql.NullInt64
+		if err := rows.Scan(&k.ID, &k.Name, &k.Status, &k.UserID, &k.UserEmail, &groupID, &k.GroupName); err != nil {
+			return nil, fmt.Errorf("scan api key: %w", err)
+		}
+		if groupID.Valid {
+			id := groupID.Int64
+			k.GroupID = &id
+		}
+		out.APIKeys = append(out.APIKeys, k)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list api keys: %w", err)
+	}
+	return out, nil
+}
