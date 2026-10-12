@@ -143,6 +143,23 @@ func canonArgs(raw json.RawMessage) string {
 	return string(b)
 }
 
+// ompInjected 统计被跳过的 omp 注入块（模型确实看到了，但 omp 不以消息形式写进会话日志）：
+//   - 中断后注入的 “You were saying this but I interrupted you: …”；
+//   - 后台任务完成时注入的 “<system-notice> Background job … has completed …”；
+//   - 托管进程退出时注入的 “Supervised process <name> exited with exit code N.”。
+// 用户在 agent 运行中的插话也被包成 <system-notice>（“User interjection during work …”），按普通用户消息比对。
+var ompInjected int
+
+func isOmpInjected(text string) bool {
+	t := strings.TrimSpace(text)
+	// 运行中插话（steer）也包在 <system-notice> 里，但那是用户自己的话（omp 日志里是普通用户消息），不能跳过。
+	if strings.HasPrefix(t, "<system-notice>") && strings.Contains(t[:min(len(t), 200)], "User interjection") {
+		return false
+	}
+	return strings.HasPrefix(t, "You were saying this but I interrupted you") || strings.HasPrefix(t, "<system-notice>") ||
+		strings.HasPrefix(t, "Supervised process ")
+}
+
 // irAtoms 把 IR 消息转成 atom；返回 thinking 块数。
 func irAtoms(msgs []ir.Message) ([]atom, int) {
 	var out []atom
@@ -154,6 +171,10 @@ func irAtoms(msgs []ir.Message) ([]atom, int) {
 			case ir.BlockText:
 				if m.Role == ir.RoleUser && strings.HasPrefix(strings.TrimSpace(b.Text), "<system-reminder>") {
 					continue // omp 注入的提醒不进它自己的会话日志
+				}
+				if m.Role == ir.RoleUser && isOmpInjected(b.Text) {
+					ompInjected++
+					continue
 				}
 				texts = append(texts, b.Text)
 			case ir.BlockThinking, ir.BlockReasoningEncrypted, ir.BlockRedactedThinking:
@@ -275,6 +296,7 @@ func TestOmpE2E(t *testing.T) {
 			}
 			var got []atom
 			ourThinking := 0
+			ompInjected = 0
 			edges := map[string]int{}
 			for _, r := range rows {
 				edges[r.Edge+"/"+r.MatchLevel+"/"+r.Status]++
@@ -325,21 +347,8 @@ func TestOmpE2E(t *testing.T) {
 			}
 			t.Logf("omp %s → %s %q: %d exchanges, trunk %d, edges %v, thinking omp=%d recorded=%d",
 				ompID, sid, sess.Title, len(rows), len(tr), edges, ompThinking, ourThinking)
-			// 录制比 omp 日志更忠实的几处（模型确实看到了，但 omp 不以消息形式写进会话日志）：
-			//   - 中断后 omp 注入一条 “You were saying this but I interrupted you: …” 用户消息；
-			//   - 后台任务完成时注入 “<system-notice> Background job … has completed …” 用户消息；
-			//   - 无事发生的工具结果在日志里写成 “[Uneventful result elided]”，实际发给模型的是全文。
-			injected := 0
-			filtered := got[:0:0]
-			for _, g := range got {
-				if g.Kind == "user" && (strings.HasPrefix(strings.TrimSpace(g.Text), "You were saying this but I interrupted you") ||
-					strings.HasPrefix(strings.TrimSpace(g.Text), "<system-notice>")) {
-					injected++
-					continue
-				}
-				filtered = append(filtered, g)
-			}
-			got = filtered
+			// 无事发生的工具结果在 omp 日志里写成 “[Uneventful result elided]”，实际发给模型的是全文。
+			injected := ompInjected
 			elided := 0
 			diffs := 0
 			for i := 0; i < max(len(want), len(got)); i++ {
