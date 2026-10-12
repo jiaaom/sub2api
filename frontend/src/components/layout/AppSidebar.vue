@@ -636,6 +636,14 @@ const SignalIcon = {
     )
 }
 
+const RecordIcon = {
+  render: () =>
+    h('svg', { fill: 'none', viewBox: '0 0 24 24', stroke: 'currentColor', 'stroke-width': '1.5' }, [
+      h('circle', { cx: '12', cy: '12', r: '8.25' }),
+      h('circle', { cx: '12', cy: '12', r: '3.25', fill: 'currentColor' })
+    ])
+}
+
 const ShieldIcon = {
   render: () =>
     h(
@@ -836,6 +844,7 @@ const adminNavItems = computed((): NavItem[] => {
       ],
     },
     { path: '/admin/usage', label: t('nav.usage'), icon: ChartIcon },
+    { path: '/admin/recording', label: t('nav.recording'), icon: RecordIcon },
     { path: '/admin/audit-logs', label: t('nav.auditLogs'), icon: ShieldIcon, hideInSimpleMode: true }
   ]
 

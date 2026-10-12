@@ -49,9 +49,9 @@
 
 ## 6. 前端 Recording tab
 
-- [ ] 6.1 `features/recording/` 骨架 + 路由 + 侧栏 + i18n（中英，更新 Hook 清单）
-- [ ] 6.2 概览页
-- [ ] 6.3 开关页（group / API key 三态）
+- [x] 6.1 `features/recording/` 骨架 + 路由 + 侧栏 + i18n（中英，更新 Hook 清单）
+- [x] 6.2 概览页
+- [x] 6.3 开关页（group / API key 三态）
 - [ ] 6.4 Sessions 列表
 - [ ] 6.5 回放页：DAG 树 + 时间线 + thinking / tool 渲染 + 前缀复用条
 - [ ] 6.6 diff 视图 + 原始 A/B/C/D 查看器

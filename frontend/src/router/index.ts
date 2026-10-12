@@ -636,6 +636,18 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/admin/recording',
+    name: 'AdminRecording',
+    component: () => import('@/features/recording/RecordingView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Recording',
+      titleKey: 'admin.recording.title',
+      descriptionKey: 'admin.recording.description'
+    }
+  },
+  {
     path: '/admin/affiliates',
     redirect: '/admin/affiliates/invites'
   },
