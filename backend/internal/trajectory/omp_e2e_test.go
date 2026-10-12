@@ -29,6 +29,9 @@ import (
 type atom struct {
 	Kind string // user / assistant / tool_call / tool_result
 	Text string
+	// Optional 来自对话中段被中止（stopReason=aborted）的 assistant 消息：omp 续跑时可能把它带进历史，
+	// 也可能直接重发中止前的请求、不带它，两种情况都算一致。
+	Optional bool
 }
 
 func (a atom) String() string {
@@ -119,9 +122,11 @@ func ompConversation(t *testing.T, path string) (string, []atom, int, bool) {
 		}
 		var m ompMessage
 		require.NoError(t, json.Unmarshal(path_[i].Message, &m))
+		aborted := m.Role == "assistant" && m.StopReason == "aborted"
 		if i == 0 {
-			lastAborted = m.Role == "assistant" && m.StopReason == "aborted"
+			lastAborted = aborted
 		}
+		from := len(atoms)
 		var texts []string
 		for _, c := range m.Content {
 			switch c.Type {
@@ -149,6 +154,11 @@ func ompConversation(t *testing.T, path string) (string, []atom, int, bool) {
 			}
 		case "toolResult":
 			atoms = append(atoms, atom{Kind: "tool_result", Text: strings.Join(texts, "\n")})
+		}
+		if aborted && i > 0 {
+			for j := from; j < len(atoms); j++ {
+				atoms[j].Optional = true
+			}
 		}
 	}
 	return sessionID, atoms, thinking, lastAborted
@@ -415,6 +425,7 @@ func TestOmpE2E(t *testing.T) {
 				ompID, sid, sess.Title, len(rows), len(tr), edges, ompThinking, ourThinking)
 			// 无事发生的工具结果在 omp 日志里写成 “[Uneventful result elided]”，实际发给模型的是全文。
 			injected := ompInjected
+			want, dropped := alignOptional(want, got)
 			elided := 0
 			diffs := 0
 			var report []string
@@ -465,10 +476,26 @@ func TestOmpE2E(t *testing.T) {
 				beyond, diffs = diffs, 0
 			}
 			require.Zero(t, diffs, "reconstructed conversation (%d atoms) differs from omp (%d atoms)", len(got), len(want))
-			fmt.Printf("OK %s: %d atoms match (omp-elided tool results: %d, omp-injected notes: %d, recap calls: %d, not yet sent: %d, beyond aborted omp tail: %d)\n",
-				ompID, len(got), elided, injected, recaps, pending, beyond)
+			fmt.Printf("OK %s: %d atoms match (omp-elided tool results: %d, omp-injected notes: %d, recap calls: %d, not yet sent: %d, beyond aborted omp tail: %d, aborted not resent: %d)\n",
+				ompID, len(got), elided, injected, recaps, pending, beyond, dropped)
 		})
 	}
+}
+
+// alignOptional 去掉 omp 日志中没有被重发给模型的中止消息（录制里对应位置不是它）。
+func alignOptional(want, got []atom) ([]atom, int) {
+	out := make([]atom, 0, len(want))
+	dropped := 0
+	for _, w := range want {
+		gi := len(out)
+		if w.Optional && (gi >= len(got) || got[gi].Kind != w.Kind || strings.TrimSpace(got[gi].Text) != strings.TrimSpace(w.Text)) {
+			dropped++
+			continue
+		}
+		w.Optional = false
+		out = append(out, w)
+	}
+	return out, dropped
 }
 
 func lastUserTextHasPrefix(msgs []ir.Message, prefix string) bool {
