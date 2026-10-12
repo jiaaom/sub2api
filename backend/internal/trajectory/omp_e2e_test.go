@@ -336,11 +336,15 @@ func TestOmpE2E(t *testing.T) {
 					got = append(got, x)
 					seen[x] = true
 				}
+				// branch 可能是在父节点响应之后分叉（父节点已有别的 continue 子节点），这时响应同样被带进了历史：
+				// 以子节点共享前缀是否超过父节点请求长度来判断。
 				carried := i == len(tr)-1
 				if !carried {
-					switch tr[i+1].Edge {
+					switch next := tr[i+1]; next.Edge {
 					case EdgeContinue, EdgePointer, EdgeSummarize:
 						carried = true
+					case EdgeBranch:
+						carried = next.PrefixMessages > r.ReqMessages
 					}
 				}
 				if p.resp != nil && carried {
