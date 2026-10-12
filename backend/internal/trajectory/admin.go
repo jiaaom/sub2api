@@ -96,6 +96,8 @@ type StatusView struct {
 	Exchanges    int64      `json:"exchanges"`
 	LastExchange *time.Time `json:"last_exchange_at,omitempty"`
 	ScannedAt    time.Time  `json:"scanned_at"`
+	// Index PG 索引状态；没有数据库时为 nil（sessions / 回放不可用）。
+	Index *IndexStats `json:"index,omitempty"`
 }
 
 // ExchangeList GET /exchanges 的返回：从 index.ndjson 倒序读取的最近 exchange。
@@ -111,6 +113,12 @@ func RegisterAdminRoutes(admin *gin.RouterGroup) {
 	g.GET("/scopes", adminListScopes)
 	g.PUT("/scopes", adminUpdateScope)
 	g.GET("/exchanges", adminListExchanges)
+	g.GET("/exchanges/:id", adminGetExchange)
+	g.GET("/exchanges/:id/raw", adminGetRaw)
+	g.GET("/sessions", adminListSessions)
+	g.GET("/sessions/:id", adminGetSession)
+	g.GET("/sessions/:id/download", adminDownloadSession)
+	g.POST("/reindex", adminReindex)
 }
 
 func recorderOr503(c *gin.Context) *Recorder {
@@ -290,7 +298,13 @@ func (r *Recorder) statusView() StatusView {
 		diskScanCache.scan = scanRoot(r.opts.Root, now)
 	}
 	s := diskScanCache.scan
+	var index *IndexStats
+	if ix := r.indexer.Load(); ix != nil {
+		st := ix.Stats()
+		index = &st
+	}
 	return StatusView{
+		Index:        index,
 		Stats:        r.Stats(),
 		Available:    true,
 		DiskBytes:    s.bytes,

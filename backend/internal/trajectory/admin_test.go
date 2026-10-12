@@ -1,8 +1,11 @@
 package trajectory
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/require"
 )
 
@@ -199,4 +203,71 @@ func TestAdminWithoutRecorder(t *testing.T) {
 	require.False(t, st.Available)
 	code, _ = adminCall[ScopesView](t, r, http.MethodGet, "/scopes", "")
 	require.Equal(t, http.StatusServiceUnavailable, code)
+}
+
+func TestAdminExchangeDetailRawAndArchive(t *testing.T) {
+	tr := newTraj(t)
+	tr.send("t1", "sess", arr(u1), arr(a1))
+	tr.send("t2", "sess", arr(u1, a1, u2), arr(reasoning, call))
+	r := gin.New()
+	RegisterAdminRoutes(r.Group("/api/v1/admin"))
+	id := tr.ids["t2"]
+
+	// 没有 PG：从每日索引定位目录；messages_from 只返回新增部分并省略 system / tools
+	code, d := adminCall[ExchangeDetail](t, r, http.MethodGet, "/exchanges/"+id+"?messages_from=2", "")
+	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, id, d.Meta.ExchangeID)
+	require.Equal(t, 3, d.TotalMsgs)
+	require.Equal(t, 2, d.MessagesFrom)
+	require.Len(t, d.Request.Messages, 1)
+	require.Nil(t, d.Request.System)
+	require.Len(t, d.Response.Messages, 2)
+	require.True(t, d.Response.Complete)
+	paths := []string{}
+	for _, f := range d.Files {
+		paths = append(paths, f.Path)
+	}
+	require.Contains(t, paths, "client.req.json")
+	require.Contains(t, paths, "attempts/0/upstream.req.json")
+
+	_, d = adminCall[ExchangeDetail](t, r, http.MethodGet, "/exchanges/"+id, "")
+	require.Len(t, d.Request.Messages, 3)
+	require.NotEmpty(t, d.Request.System)
+
+	raw := func(q string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/admin/recording/exchanges/"+id+"/raw?"+q, nil))
+		return w
+	}
+	w := raw("file=client.req.json&offset=2&limit=5")
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, `model`, w.Body.String())
+	require.NotEmpty(t, w.Header().Get("X-Total-Size"))
+	require.Equal(t, http.StatusNotFound, raw("file=../../../../etc/passwd").Code)
+	require.Equal(t, http.StatusNotFound, raw("file=attempts/../meta.json").Code)
+
+	code, _ = adminCall[ExchangeDetail](t, r, http.MethodGet, "/exchanges/not-an-id", "")
+	require.Equal(t, http.StatusNotFound, code)
+	code, _ = adminCall[ExchangeDetail](t, r, http.MethodGet, "/sessions", "")
+	require.Equal(t, http.StatusServiceUnavailable, code, "sessions need the PG index")
+
+	// 打包
+	rows := tr.store.all()
+	var buf bytes.Buffer
+	require.NoError(t, writeSessionArchive(&buf, "session-x", tr.rec.Root(), &SessionRow{SessionID: "x"}, rows))
+	zr, err := zstd.NewReader(&buf)
+	require.NoError(t, err)
+	defer zr.Close()
+	tarR := tar.NewReader(zr)
+	var names []string
+	for {
+		h, err := tarR.Next()
+		if err == io.EOF {
+			break
+		}
+		require.NoError(t, err)
+		names = append(names, h.Name)
+	}
+	require.Contains(t, names, "session-x/session.json")
+	require.Contains(t, names, "session-x/"+rows[1].RawPath+"/attempts/0/upstream.resp.sse")
 }

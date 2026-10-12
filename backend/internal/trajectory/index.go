@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -139,11 +138,10 @@ type Indexer struct {
 	done    chan struct{}
 	pending inflight
 
-	indexed   atomic.Int64
-	dropped   atomic.Int64
-	failed    atomic.Int64
-	rebuildMu sync.Mutex
-	rebuild   atomic.Bool
+	indexed atomic.Int64
+	dropped atomic.Int64
+	failed  atomic.Int64
+	rebuild atomic.Bool
 }
 
 type indexJob struct {

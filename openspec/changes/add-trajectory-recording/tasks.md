@@ -43,8 +43,8 @@
 ## 5. 管理 API
 
 - [x] 5.1 status / scopes
-- [ ] 5.2 sessions / exchanges 查询，原始 part 分段读取（已有简易版 `GET /exchanges`：从 index.ndjson 倒序读最近 N 条，PG 索引完成后替换）
-- [ ] 5.3 下载：session tar.zst、按日期范围导出、IR jsonl
+- [x] 5.2 sessions / exchanges 查询，原始 part 分段读取（`GET /exchanges` 仍读 index.ndjson；`/exchanges/:id?messages_from=` 只返回新增消息）
+- [ ] 5.3 下载：session tar.zst（✅）、按日期范围导出、IR jsonl
 - [x] 5.4 在 `routes/admin.go` 挂载（更新 Hook 清单）
 
 ## 6. 前端 Recording tab
