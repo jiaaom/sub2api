@@ -111,3 +111,25 @@ func TestRequestedModelAndStream(t *testing.T) {
 	require.True(t, requestWantsStream(ProtocolGemini, "/v1beta/models/g:generateContent", "alt=sse", nil))
 	require.False(t, requestWantsStream(ProtocolOpenAIChat, "/v1/chat/completions", "", []byte(`{"stream":false}`)))
 }
+
+func TestParseResponseSummaryTerminal(t *testing.T) {
+	cases := []struct {
+		protocol, body string
+		sse, terminal  bool
+	}{
+		{ProtocolOpenAIResponses, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"status\":\"in_progress\"}}\n\n", true, false},
+		{ProtocolOpenAIResponses, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\"}}\n\n", true, true},
+		{ProtocolOpenAIResponses, `{"id":"resp_1","object":"response","status":"incomplete"}`, false, true},
+		{ProtocolAnthropicMessages, "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n", true, false},
+		{ProtocolAnthropicMessages, "data: {\"type\":\"message_stop\"}\n\n", true, true},
+		{ProtocolAnthropicMessages, `{"id":"msg_1","type":"message","stop_reason":"end_turn"}`, false, true},
+		{ProtocolOpenAIChat, "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n", true, false},
+		{ProtocolOpenAIChat, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n", true, true},
+		{ProtocolOpenAIChat, "data: [DONE]\n\n", true, true},
+		{ProtocolGemini, "data: {\"candidates\":[{\"content\":{}}]}\n\n", true, false},
+		{ProtocolGemini, "data: {\"response\":{\"candidates\":[{\"finishReason\":\"STOP\"}]}}\n\n", true, true},
+	}
+	for _, tc := range cases {
+		require.Equal(t, tc.terminal, parseResponseSummary(tc.protocol, []byte(tc.body), tc.sse).terminal, tc.body)
+	}
+}

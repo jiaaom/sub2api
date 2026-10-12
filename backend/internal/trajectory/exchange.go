@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -320,9 +321,22 @@ func (ex *Exchange) finalize() {
 		m.Status = StatusError
 		m.Notes = append(m.Notes, "handler panicked")
 	} else if m.Client.Canceled {
-		m.Status = StatusIncomplete
+		// 客户端常在收到终止事件后立即断开（如 oh-my-pi 收到 response.completed 即关连接）：
+		// 此时 D 已完整，canceled 仅作为事实保留。
+		if !m.Truncated && responseFileTerminal(ex.dir, m.Client.Protocol, m.Client.ResponseFile) {
+			m.Notes = append(m.Notes, "client disconnected after terminal event")
+		} else {
+			m.Status = StatusIncomplete
+		}
 	}
 	for i := range m.Attempts {
+		// 读到终止事件后才因取消/读错误结束的 attempt，数据已完整，按 closed_early 处理；原始错误保留在 error。
+		if att := &m.Attempts[i]; (att.Outcome == OutcomeError || att.Outcome == OutcomeAborted) && !att.Truncated &&
+			responseFileTerminal(ex.dir, att.UpstreamProtocol, att.ResponseFile) {
+			m.Notes = append(m.Notes, fmt.Sprintf("attempt %d: terminal event received before %s; treated as %s", i, att.Outcome, OutcomeClosedEarly))
+			att.Outcome = OutcomeClosedEarly
+		}
+
 		switch m.Attempts[i].Outcome {
 		case OutcomeAborted, OutcomeAbandoned, OutcomePending:
 			if m.Status == StatusComplete {

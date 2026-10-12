@@ -64,6 +64,9 @@ type responseSummary struct {
 	responseID string
 	stopReason string
 	usage      *Usage
+	// terminal 是否见到协议的终止事件（response.completed、message_stop、[DONE]、finishReason 等），
+	// 即响应在协议层面已完整，此后的断连不影响数据完整性。
+	terminal bool
 }
 
 // parseResponseSummary 按协议解析响应；sse=true 时逐个 data: 事件解析，否则按 JSON（对象或数组）解析。
@@ -83,6 +86,10 @@ func parseResponseSummary(protocol string, body []byte, sse bool) responseSummar
 	}
 	if sse {
 		forEachSSEData(body, func(data []byte) {
+			if bytes.Equal(data, []byte("[DONE]")) {
+				s.terminal = true
+				return
+			}
 			if gjson.ValidBytes(data) {
 				visit(gjson.ParseBytes(data))
 			}
@@ -159,6 +166,9 @@ func (s *responseSummary) visitAnthropic(doc gjson.Result) {
 	if v := doc.Get("delta.stop_reason").String(); v != "" {
 		s.stopReason = v
 	}
+	if t := doc.Get("type").String(); t == "message_stop" || (t == "message" && msg.Get("stop_reason").String() != "") {
+		s.terminal = true
+	}
 	usage := msg.Get("usage")
 	if !usage.Exists() {
 		usage = doc.Get("usage")
@@ -182,6 +192,7 @@ func (s *responseSummary) visitOpenAIChat(doc gjson.Result) {
 	}
 	if v := doc.Get("choices.0.finish_reason").String(); v != "" {
 		s.stopReason = v
+		s.terminal = true
 	}
 	if usage := doc.Get("usage"); usage.Exists() && usage.Type != gjson.Null {
 		u := s.ensureUsage()
@@ -208,6 +219,7 @@ func (s *responseSummary) visitOpenAIResponses(doc gjson.Result) {
 		s.model = v
 	}
 	if v := resp.Get("status").String(); v != "" && v != "in_progress" && v != "queued" {
+		s.terminal = true
 		s.stopReason = v
 		if reason := resp.Get("incomplete_details.reason").String(); reason != "" {
 			s.stopReason = v + ":" + reason
@@ -235,6 +247,7 @@ func (s *responseSummary) visitGemini(doc gjson.Result) {
 	}
 	if v := doc.Get("candidates.0.finishReason").String(); v != "" {
 		s.stopReason = v
+		s.terminal = true
 	}
 	if usage := doc.Get("usageMetadata"); usage.Exists() {
 		u := s.ensureUsage()
@@ -243,4 +256,16 @@ func (s *responseSummary) visitGemini(doc gjson.Result) {
 		setIfPositive(&u.CacheRead, usage.Get("cachedContentTokenCount"))
 		setIfPositive(&u.Reasoning, usage.Get("thoughtsTokenCount"))
 	}
+}
+
+// responseFileTerminal 判断已落盘的响应文件是否包含协议终止事件。
+func responseFileTerminal(dir, protocol, file string) bool {
+	if file == "" {
+		return false
+	}
+	body, err := os.ReadFile(filepath.Join(dir, file))
+	if err != nil || len(body) == 0 {
+		return false
+	}
+	return parseResponseSummary(protocol, body, strings.HasSuffix(file, ".sse")).terminal
 }

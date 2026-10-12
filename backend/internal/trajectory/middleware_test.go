@@ -290,3 +290,70 @@ func TestMiddlewarePassthroughWithoutDefaultRecorder(t *testing.T) {
 	})
 	require.Equal(t, "ok", postJSON(r, "/v1/messages", `{}`).Body.String())
 }
+
+// errAfterBody 先吐出 data，随后以 err 结束（模拟上游读在终止事件之后因 context 取消而报错）。
+type errAfterBody struct {
+	r   *strings.Reader
+	err error
+}
+
+func (b *errAfterBody) Read(p []byte) (int, error) {
+	if b.r.Len() == 0 {
+		return 0, b.err
+	}
+	return b.r.Read(p)
+}
+
+func (b *errAfterBody) Close() error { return nil }
+
+// oh-my-pi 收到 response.completed 后立即断开：客户端 ctx 被取消、上游读报 context canceled，
+// 但 C/D 都已包含终止事件，数据完整，不应标为 incomplete。
+func TestMiddlewareClientDisconnectAfterTerminalEventIsComplete(t *testing.T) {
+	for name, partial := range map[string]bool{"after terminal": false, "before terminal": true} {
+		t.Run(name, func(t *testing.T) {
+			rec := newTestRecorder(t, enabledScopes())
+			useDefault(t, rec)
+			sent := upstreamSSE
+			if partial {
+				sent = upstreamSSE[:strings.Index(upstreamSSE, "event: response.completed")]
+			}
+			fake := &fakeUpstream{respond: func(*http.Request) (*http.Response, error) {
+				h := http.Header{"Content-Type": {"text/event-stream"}}
+				return &http.Response{StatusCode: 200, Header: h, Body: &errAfterBody{r: strings.NewReader(sent), err: context.Canceled}}, nil
+			}}
+			up := WrapHTTPUpstream(fake, rec)
+			ctx, cancel := context.WithCancel(context.Background())
+			handler := func(c *gin.Context) {
+				_, _ = io.ReadAll(c.Request.Body)
+				req, _ := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, "https://api.example.com/v1/responses", strings.NewReader(upstreamBody))
+				resp, err := up.Do(req, "", 7, 1)
+				require.NoError(t, err)
+				defer func() { _ = resp.Body.Close() }()
+				c.Header("Content-Type", "text/event-stream")
+				c.Status(http.StatusOK)
+				_, copyErr := io.Copy(c.Writer, resp.Body)
+				require.ErrorIs(t, copyErr, context.Canceled)
+				cancel() // 客户端断开
+			}
+			engine := newGatewayEngine(rec, up, testAPIKey(), handler)
+			req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(clientBody)).WithContext(ctx)
+			req.Header.Set("Content-Type", "application/json")
+			engine.ServeHTTP(httptest.NewRecorder(), req)
+
+			_, m := onlyExchange(t, rec)
+			require.True(t, m.Client.Canceled, "the disconnect itself must still be recorded")
+			require.Equal(t, "context canceled", m.Attempts[0].Error)
+			if partial {
+				require.Equal(t, StatusIncomplete, m.Status)
+				require.Equal(t, OutcomeError, m.Attempts[0].Outcome)
+				require.Nil(t, m.FinalAttempt)
+				return
+			}
+			require.Equal(t, StatusComplete, m.Status)
+			require.Equal(t, OutcomeClosedEarly, m.Attempts[0].Outcome)
+			require.NotNil(t, m.FinalAttempt)
+			require.Equal(t, "resp_1", m.ResponseID)
+			require.Len(t, m.Notes, 2)
+		})
+	}
+}
