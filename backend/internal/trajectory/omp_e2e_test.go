@@ -147,6 +147,7 @@ func canonArgs(raw json.RawMessage) string {
 //   - 中断后注入的 “You were saying this but I interrupted you: …”；
 //   - 后台任务完成时注入的 “<system-notice> Background job … has completed …”；
 //   - 托管进程退出时注入的 “Supervised process <name> exited with exit code N.”。
+//
 // 用户在 agent 运行中的插话也被包成 <system-notice>（“User interjection during work …”），按普通用户消息比对。
 var ompInjected int
 
@@ -297,6 +298,7 @@ func TestOmpE2E(t *testing.T) {
 			var got []atom
 			ourThinking := 0
 			ompInjected = 0
+			recaps := 0
 			edges := map[string]int{}
 			for _, r := range rows {
 				edges[r.Edge+"/"+r.MatchLevel+"/"+r.Status]++
@@ -318,6 +320,11 @@ func TestOmpE2E(t *testing.T) {
 				p := parseExchange(dir, m)
 				require.NoError(t, p.reqErr)
 				msgs := p.req.Messages[displayFromRow(r, byID, visible):]
+				// omp 的“回来后回顾”（<recap> …）是真实的模型调用，但不写进会话日志：整轮不参与比对。
+				if lastUserTextHasPrefix(msgs, "<recap>") {
+					recaps++
+					continue
+				}
 				if r.Edge == EdgeCompaction && len(msgs) > 0 {
 					msgs = msgs[1:]
 				}
@@ -351,6 +358,7 @@ func TestOmpE2E(t *testing.T) {
 			injected := ompInjected
 			elided := 0
 			diffs := 0
+			var report []string
 			for i := 0; i < max(len(want), len(got)); i++ {
 				var w, g atom
 				if i < len(want) {
@@ -368,12 +376,47 @@ func TestOmpE2E(t *testing.T) {
 				if !same {
 					diffs++
 					if diffs <= 8 {
-						t.Errorf("atom %d differs:\n  omp:      %v\n  recorded: %v", i, w, g)
+						report = append(report, fmt.Sprintf("atom %d differs:\n  omp:      %v\n  recorded: %v", i, w, g))
 					}
 				}
 			}
+			// omp 日志末尾可能有尚未发给模型的内容（例如用户中止后的 “Command aborted” 工具结果）：
+			// 录制是日志的前缀、且多出的只有工具结果 / 用户消息时视为一致。
+			pending := 0
+			if diffs > 0 && len(got) < len(want) && diffs == len(want)-len(got) {
+				pending = len(want) - len(got)
+				for _, w := range want[len(got):] {
+					if w.Kind == "assistant" || w.Kind == "tool_call" {
+						pending = 0
+					}
+				}
+				if pending > 0 {
+					diffs = 0
+				}
+			}
+			for _, r := range report {
+				if diffs > 0 {
+					t.Error(r)
+				}
+			}
 			require.Zero(t, diffs, "reconstructed conversation (%d atoms) differs from omp (%d atoms)", len(got), len(want))
-			fmt.Printf("OK %s: %d atoms match (omp-elided tool results: %d, omp-injected interrupt notes: %d)\n", ompID, len(want), elided, injected)
+			fmt.Printf("OK %s: %d atoms match (omp-elided tool results: %d, omp-injected notes: %d, recap calls: %d, not yet sent: %d)\n",
+				ompID, len(got), elided, injected, recaps, pending)
 		})
 	}
+}
+
+func lastUserTextHasPrefix(msgs []ir.Message, prefix string) bool {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role != ir.RoleUser {
+			continue
+		}
+		for _, b := range msgs[i].Blocks {
+			if b.Type == ir.BlockText && strings.HasPrefix(strings.TrimSpace(b.Text), prefix) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }
