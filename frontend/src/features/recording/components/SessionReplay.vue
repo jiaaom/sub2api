@@ -5,7 +5,10 @@
         <button type="button" class="text-sm text-primary-600 hover:underline dark:text-primary-400" data-test="replay-back" @click="$emit('back')">
           ← {{ t('admin.recording.replay.back') }}
         </button>
-        <h2 class="mt-2 truncate text-lg font-semibold text-gray-950 dark:text-white">{{ detail?.session.title || t('admin.recording.sessions.untitled') }}</h2>
+        <h2 class="mt-2 flex min-w-0 text-lg font-semibold text-gray-950 dark:text-white">
+          <SessionLabelEditor v-if="detail" :session-id="detail.session.session_id" :label="detail.session.label" :title="detail.session.title" @saved="detail.session.label = $event" />
+        </h2>
+        <p v-if="detail?.session.label && detail.session.title" class="mt-0.5 truncate text-xs text-gray-500 dark:text-dark-400">{{ detail.session.title }}</p>
         <p v-if="detail" class="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-dark-400">
           <span>{{ detail.session.detected_client || '—' }}</span>
           <span class="font-mono">{{ detail.session.last_model }}</span>
@@ -71,6 +74,7 @@ import type { SessionDetail } from '../types'
 import { displayFrom, formatCount, numberRows, trunkOf } from '../viewModel'
 import ExchangeCard from './ExchangeCard.vue'
 import RawViewer from './RawViewer.vue'
+import SessionLabelEditor from './SessionLabelEditor.vue'
 
 const props = defineProps<{ sessionId: string }>()
 defineEmits<{ (e: 'back'): void }>()

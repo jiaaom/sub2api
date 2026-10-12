@@ -74,6 +74,7 @@ export default {
       rebuild: '重建索引',
       unavailable: '索引不可用（没有数据库），会话与回放功能已停用。',
     },
+    label: { rename: '重命名', input: '会话名称' },
     sessions: {
       title: '会话',
       description: '按客户端的会话标识归组（没有标识时按串联结果归组）。打开后可从 system prompt 开始回放整段过程。',
@@ -142,6 +143,7 @@ export default {
       loadExchange: '加载 exchange 失败',
       loadRaw: '加载原始文件失败',
       download: '下载失败',
+      saveLabel: '重命名会话失败',
       reindex: '启动索引重建失败',
     },
   },

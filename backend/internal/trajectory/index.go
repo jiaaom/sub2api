@@ -100,6 +100,8 @@ type SessionRow struct {
 	LastModel       string    `json:"last_model"`
 	MaxMessages     int       `json:"max_messages"`
 	Title           string    `json:"title"`
+	// Label 用户自定义名称（trajectory_session_labels），为空表示未命名。
+	Label string `json:"label"`
 }
 
 // linkCandidate 链尾哈希命中新请求链的已有 exchange。

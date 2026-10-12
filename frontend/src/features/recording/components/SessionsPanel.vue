@@ -49,7 +49,8 @@
             @keydown.enter="$emit('open', s.session_id)"
           >
             <td class="max-w-md px-3 py-2">
-              <span class="block truncate font-medium text-gray-900 dark:text-white">{{ s.title || t('admin.recording.sessions.untitled') }}</span>
+              <SessionLabelEditor class="font-medium text-gray-900 dark:text-white" :session-id="s.session_id" :label="s.label" :title="s.title" @saved="s.label = $event" />
+              <span v-if="s.label && s.title" class="block truncate text-xs text-gray-500 dark:text-dark-400">{{ s.title }}</span>
               <span class="block truncate font-mono text-[11px] text-gray-400" :title="s.hint">{{ s.hint || s.session_id }}</span>
             </td>
             <td class="whitespace-nowrap px-3 py-2">{{ s.detected_client || '—' }}</td>
@@ -81,6 +82,7 @@ import { extractApiErrorMessage } from '@/utils/apiError'
 import recordingAPI from '../api'
 import type { SessionFilters, SessionPage } from '../types'
 import { formatCount } from '../viewModel'
+import SessionLabelEditor from './SessionLabelEditor.vue'
 
 defineEmits<{ (e: 'open', id: string): void }>()
 const { t } = useI18n()

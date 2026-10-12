@@ -86,7 +86,7 @@ describe('SessionReplay', () => {
     },
   })
   const session: SessionDetail = {
-    session: { session_id: 's', user_id: 1, hint_source: '', hint: 'h', detected_client: 'oh-my-pi', first_at: '2026-10-12T03:07:42Z', last_at: '2026-10-12T03:11:59Z', exchanges: 3, input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, last_model: 'm', max_messages: 5, title: 'hi' },
+    session: { session_id: 's', user_id: 1, hint_source: '', hint: 'h', detected_client: 'oh-my-pi', first_at: '2026-10-12T03:07:42Z', last_at: '2026-10-12T03:11:59Z', exchanges: 3, input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, last_model: 'm', max_messages: 5, title: 'hi', label: '' },
     exchanges: [
       row('a'),
       row('b', { parent_id: 'a', edge: 'continue', match_level: 'no_thinking', prefix_messages: 2, req_messages: 3 }),

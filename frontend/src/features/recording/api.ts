@@ -73,6 +73,12 @@ export async function downloadSession(id: string): Promise<Blob> {
   return res.data as Blob
 }
 
+/** 设置会话自定义名称；空串清除。 */
+export async function setSessionLabel(id: string, label: string): Promise<{ session_id: string; label: string }> {
+  const { data } = await apiClient.put<{ session_id: string; label: string }>(`${basePath}/sessions/${encodeURIComponent(id)}/label`, { label })
+  return data
+}
+
 export async function reindex(): Promise<{ started: boolean }> {
   const { data } = await apiClient.post<{ started: boolean }>(`${basePath}/reindex`)
   return data
@@ -88,5 +94,6 @@ export default {
   getExchange,
   getRaw,
   downloadSession,
+  setSessionLabel,
   reindex,
 }

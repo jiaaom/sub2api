@@ -74,6 +74,7 @@ export default {
       rebuild: 'Rebuild index',
       unavailable: 'Index unavailable (no database): sessions and replay are disabled.',
     },
+    label: { rename: 'Rename', input: 'Session name' },
     sessions: {
       title: 'Sessions',
       description: 'Exchanges grouped by the client session hint (or by the linked chain when there is none). Open one to replay it from the system prompt onward.',
@@ -142,6 +143,7 @@ export default {
       loadExchange: 'Failed to load exchange',
       loadRaw: 'Failed to load raw file',
       download: 'Download failed',
+      saveLabel: 'Failed to rename session',
       reindex: 'Failed to start index rebuild',
     },
   },

@@ -220,57 +220,51 @@ func (s *pgIndexStore) listSessions(ctx context.Context, q SessionQuery) ([]Sess
 		where = append(where, fmt.Sprintf(cond, len(args)))
 	}
 	if q.UserID > 0 {
-		add("user_id = $%d", q.UserID)
+		add("s.user_id = $%d", q.UserID)
 	}
 	if q.Client != "" {
-		add("detected_client = $%d", q.Client)
+		add("s.detected_client = $%d", q.Client)
 	}
 	if q.Model != "" {
-		add("last_model ILIKE '%%' || $%d || '%%'", q.Model)
+		add("s.last_model ILIKE '%%' || $%d || '%%'", q.Model)
 	}
 	if q.Q != "" {
-		add("(title ILIKE '%%' || $%[1]d || '%%' OR hint = $%[1]d OR session_id = $%[1]d)", q.Q)
+		add("(s.title ILIKE '%%' || $%[1]d || '%%' OR l.label ILIKE '%%' || $%[1]d || '%%' OR s.hint = $%[1]d OR s.session_id = $%[1]d)", q.Q)
 	}
 	if q.From != nil {
-		add("last_at >= $%d", *q.From)
+		add("s.last_at >= $%d", *q.From)
 	}
 	if q.To != nil {
-		add("first_at < $%d", *q.To)
+		add("s.first_at < $%d", *q.To)
 	}
 	cond := ""
 	if len(where) > 0 {
 		cond = "WHERE " + strings.Join(where, " AND ")
 	}
 	var total int64
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM trajectory_sessions `+cond, args...).Scan(&total); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM trajectory_sessions s `+sessionLabelJoin+` `+cond, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	args = append(args, q.PageSize, (q.Page-1)*q.PageSize)
-	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`SELECT session_id, user_id, hint_source, hint, detected_client, first_at, last_at, exchanges,
-  input_tokens, output_tokens, cache_read_tokens, last_model, max_messages, title
-FROM trajectory_sessions %s ORDER BY last_at DESC LIMIT $%d OFFSET $%d`, cond, len(args)-1, len(args)), args...)
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`SELECT `+sessionColumns+`
+FROM trajectory_sessions s %s %s ORDER BY s.last_at DESC LIMIT $%d OFFSET $%d`, sessionLabelJoin, cond, len(args)-1, len(args)), args...)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer func() { _ = rows.Close() }()
 	out := []SessionRow{}
 	for rows.Next() {
-		var r SessionRow
-		if err := rows.Scan(&r.SessionID, &r.UserID, &r.HintSource, &r.Hint, &r.DetectedClient, &r.FirstAt, &r.LastAt, &r.Exchanges,
-			&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.LastModel, &r.MaxMessages, &r.Title); err != nil {
+		r, err := scanSession(rows)
+		if err != nil {
 			return nil, 0, err
 		}
-		out = append(out, r)
+		out = append(out, *r)
 	}
 	return out, total, rows.Err()
 }
 
 func (s *pgIndexStore) getSession(ctx context.Context, id string) (*SessionRow, []ExchangeRow, error) {
-	var r SessionRow
-	err := s.db.QueryRowContext(ctx, `SELECT session_id, user_id, hint_source, hint, detected_client, first_at, last_at, exchanges,
-  input_tokens, output_tokens, cache_read_tokens, last_model, max_messages, title FROM trajectory_sessions WHERE session_id = $1`, id).
-		Scan(&r.SessionID, &r.UserID, &r.HintSource, &r.Hint, &r.DetectedClient, &r.FirstAt, &r.LastAt, &r.Exchanges,
-			&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.LastModel, &r.MaxMessages, &r.Title)
+	r, err := scanSession(s.db.QueryRowContext(ctx, `SELECT `+sessionColumns+` FROM trajectory_sessions s `+sessionLabelJoin+` WHERE s.session_id = $1`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil, nil
 	}
@@ -290,7 +284,33 @@ func (s *pgIndexStore) getSession(ctx context.Context, id string) (*SessionRow, 
 		}
 		ex = append(ex, *e)
 	}
-	return &r, ex, rows.Err()
+	return r, ex, rows.Err()
+}
+
+const sessionColumns = `s.session_id, s.user_id, s.hint_source, s.hint, s.detected_client, s.first_at, s.last_at, s.exchanges,
+  s.input_tokens, s.output_tokens, s.cache_read_tokens, s.last_model, s.max_messages, s.title, COALESCE(l.label, '')`
+
+const sessionLabelJoin = `LEFT JOIN trajectory_session_labels l ON l.session_id = s.session_id`
+
+func scanSession(sc interface{ Scan(...any) error }) (*SessionRow, error) {
+	var r SessionRow
+	err := sc.Scan(&r.SessionID, &r.UserID, &r.HintSource, &r.Hint, &r.DetectedClient, &r.FirstAt, &r.LastAt, &r.Exchanges,
+		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.LastModel, &r.MaxMessages, &r.Title, &r.Label)
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+// setSessionLabel 设置自定义名称；空串表示删除。不要求 session 已在索引中（重建期间也能改名）。
+func (s *pgIndexStore) setSessionLabel(ctx context.Context, id, label string) error {
+	if label == "" {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM trajectory_session_labels WHERE session_id = $1`, id)
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO trajectory_session_labels (session_id, label, updated_at) VALUES ($1, $2, NOW())
+ON CONFLICT (session_id) DO UPDATE SET label = EXCLUDED.label, updated_at = NOW()`, id, label)
+	return err
 }
 
 func (s *pgIndexStore) getExchange(ctx context.Context, id string) (*ExchangeRow, error) {

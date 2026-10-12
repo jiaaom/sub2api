@@ -122,6 +122,8 @@ export interface SessionRow {
   last_model: string
   max_messages: number
   title: string
+  /** 用户自定义名称，空串表示未命名 */
+  label: string
 }
 
 export interface SessionPage {

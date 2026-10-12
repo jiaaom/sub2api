@@ -118,6 +118,7 @@ func RegisterAdminRoutes(admin *gin.RouterGroup) {
 	g.GET("/sessions", adminListSessions)
 	g.GET("/sessions/:id", adminGetSession)
 	g.GET("/sessions/:id/download", adminDownloadSession)
+	g.PUT("/sessions/:id/label", adminSetSessionLabel)
 	g.POST("/reindex", adminReindex)
 }
 

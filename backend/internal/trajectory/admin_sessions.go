@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/trajectory/ir"
@@ -353,4 +354,46 @@ func adminReindex(c *gin.Context) {
 		return
 	}
 	response.Success(c, gin.H{"started": ix.Rebuild()})
+}
+
+const maxSessionLabelRunes = 200
+
+// adminSetSessionLabel PUT /sessions/:id/label {"label": "..."}；空串清除自定义名称。
+func adminSetSessionLabel(c *gin.Context) {
+	rec := recorderOr503(c)
+	if rec == nil {
+		return
+	}
+	st, err := rec.pgStore()
+	if err != nil {
+		response.Error(c, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	var body struct {
+		Label string `json:"label"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		response.BadRequest(c, "invalid request body: "+err.Error())
+		return
+	}
+	label := strings.TrimSpace(body.Label)
+	if utf8.RuneCountInString(label) > maxSessionLabelRunes {
+		response.BadRequest(c, fmt.Sprintf("label is longer than %d characters", maxSessionLabelRunes))
+		return
+	}
+	id := c.Param("id")
+	sess, _, err := st.getSession(c.Request.Context(), id)
+	if err != nil {
+		response.InternalError(c, err.Error())
+		return
+	}
+	if sess == nil {
+		response.NotFound(c, "session not found")
+		return
+	}
+	if err := st.setSessionLabel(c.Request.Context(), id, label); err != nil {
+		response.InternalError(c, err.Error())
+		return
+	}
+	response.Success(c, gin.H{"session_id": id, "label": label})
 }

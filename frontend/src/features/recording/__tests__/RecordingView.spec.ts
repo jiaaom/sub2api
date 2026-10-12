@@ -142,7 +142,7 @@ describe('RecordingView sessions and replay', () => {
 
   it('lists sessions lazily and opens one through the query string', async () => {
     mocks.listSessions.mockResolvedValue({
-      items: [{ session_id: 'hf01', user_id: 1, hint_source: 'body:prompt_cache_key', hint: '01a1', detected_client: 'oh-my-pi', first_at: '2026-10-12T03:07:42Z', last_at: '2026-10-12T03:11:59Z', exchanges: 3, input_tokens: 56773, output_tokens: 499, cache_read_tokens: 0, last_model: 'deepseek-v4-flash', max_messages: 10, title: '你好' }],
+      items: [{ session_id: 'hf01', user_id: 1, hint_source: 'body:prompt_cache_key', hint: '01a1', detected_client: 'oh-my-pi', first_at: '2026-10-12T03:07:42Z', last_at: '2026-10-12T03:11:59Z', exchanges: 3, input_tokens: 56773, output_tokens: 499, cache_read_tokens: 0, last_model: 'deepseek-v4-flash', max_messages: 10, title: '你好', label: '' }],
       total: 1, page: 1, page_size: 30, pages: 1,
     })
     const wrapper = mountView()
@@ -161,7 +161,7 @@ describe('RecordingView sessions and replay', () => {
   it('renders the replay page when ?session= is present', async () => {
     mocks.route.query = { tab: 'sessions', session: 'hf01' }
     mocks.getSession.mockResolvedValue({
-      session: { session_id: 'hf01', user_id: 1, hint_source: '', hint: '', detected_client: 'oh-my-pi', first_at: '2026-10-12T03:07:42Z', last_at: '2026-10-12T03:11:59Z', exchanges: 2, input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, last_model: 'm', max_messages: 5, title: 'hello' },
+      session: { session_id: 'hf01', user_id: 1, hint_source: '', hint: '', detected_client: 'oh-my-pi', first_at: '2026-10-12T03:07:42Z', last_at: '2026-10-12T03:11:59Z', exchanges: 2, input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, last_model: 'm', max_messages: 5, title: 'hello', label: '' },
       exchanges: [],
     })
     const wrapper = mountView()
