@@ -199,6 +199,19 @@ func (m *memIndexStore) spawnCandidates(_ context.Context, userID int64, since, 
 	return out, nil
 }
 
+func (m *memIndexStore) sessionBusyBetween(_ context.Context, session string, after, before time.Time, parent string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, r := range m.rows {
+		directNext := r.ParentID != nil && *r.ParentID == parent && (r.Edge == EdgeContinue || r.Edge == EdgePointer)
+		if r.SessionID == session && r.ExchangeID != parent && r.StartedAt.After(after) && r.StartedAt.Before(before) &&
+			r.Kind != KindSubagent && r.Kind != KindCountTokens && !directNext {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (m *memIndexStore) setSessionParent(_ context.Context, session, parentSession, parentExchange, callID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -596,4 +609,89 @@ func TestIndexLinksSubagentToSpawningToolCall(t *testing.T) {
 	require.Equal(t, tr.ids["main1"], sub.ParentExchangeID)
 	require.Equal(t, "call_task", sub.ParentCallID)
 	require.True(t, strings.HasPrefix(tr.row("sub1").Title, "Complete assignment thoroughly: # Target"), tr.row("sub1").Title)
+}
+
+// 实录里的三类误判（2026-10-15 autoresearch）：工具参数（init_experiment 的 goal、log_experiment 的说明）
+// 只是碰巧又出现在别的请求里，不是派出子 agent。
+func TestIndexSubagentRejectsCoincidentalArgs(t *testing.T) {
+	user := func(text string) string { return fmt.Sprintf(`{"role":"user","content":%q}`, text) }
+	goal := "Minimize cost (METRIC cost, lower is better). Read AGENTS.md first. Then iterate on the kernel until the metric stops improving."
+	note := "Unrolled the inner loop by four and pipelined the accumulator; latency dropped from 812us to 640us with no extra DSPs used."
+	call := func(id, name, key, val string) string {
+		args, _ := json.Marshal(map[string]string{key: val})
+		return fmt.Sprintf(`{"type":"function_call","call_id":%q,"name":%q,"arguments":%q}`, id, name, string(args))
+	}
+	initCall := call("call_init", "init_experiment", "goal", goal)
+	logCall := call("call_log", "log_experiment", "description", note)
+	out := func(id string) string {
+		return fmt.Sprintf(`{"type":"function_call_output","call_id":%q,"output":"ok"}`, id)
+	}
+
+	tr := newTraj(t)
+	tr.send("run1", "run1", arr(user(goal)), arr(initCall))
+	// 1) 父会话之后的压缩请求：对话转储里有 log_experiment 的参数，但不在开头
+	tr.send("log", "run1", arr(user(goal), initCall, out("call_init")), arr(logCall))
+	tr.instructions = "Summarize user–AI coding-assistant conversations in the exact specified structured format."
+	dump := "<conversation>\n<system-notice>Background job bg_3 has completed. Resume your work using the result below.</system-notice>" +
+		"<assistant>Baseline verified. Logging the experiment now.</assistant><tool_call>log_experiment " + note + "</tool_call></conversation>"
+	tr.send("compact", "run1", arr(user(dump)), arr(a1))
+	// 2) 前缀没接上的主线请求（有 assistant 消息），开头用户消息正是 goal
+	tr.instructions = "sys v2"
+	tr.send("rewritten", "run1", arr(user(goal), initCall, out("call_init"), logCall, out("call_log")), arr(a2))
+	// 3) 父会话已经往下走之后，用同一段提示词另起的独立会话
+	tr.instructions = "sys"
+	tr.send("run2", "run2", arr(user(goal)), arr(a1))
+
+	for _, name := range []string{"compact", "rewritten", "run2"} {
+		require.NotEqual(t, EdgeSubagent, tr.row(name).Edge, name)
+		require.NotEqual(t, KindSubagent, tr.row(name).Kind, name)
+	}
+	require.Empty(t, tr.store.sessions[tr.row("run2").SessionID].ParentSessionID)
+}
+
+// omp 的 task 工具立即返回：父 agent 的下一轮比子 agent 第一轮早几十毫秒发出（实录 2026-10-12 场景 G）。
+// 父节点的直接接续不关闭执行窗口，再往后一轮才关。
+func TestIndexSubagentAfterParentContinues(t *testing.T) {
+	task := "# Target\nFile: notes.md in the working directory.\n\n# Change\nCreate notes.md with exactly three bullet points about tail recursion."
+	args, _ := json.Marshal(map[string]any{"tasks": []map[string]string{{"name": "NotesWriter", "task": task}}})
+	taskCall := fmt.Sprintf(`{"type":"function_call","call_id":"call_task","name":"task","arguments":%q}`, string(args))
+	taskOut := `{"type":"function_call_output","call_id":"call_task","output":"Spawned agent NotesWriter"}`
+	subFirst := fmt.Sprintf(`{"role":"user","content":%q}`, "Complete assignment thoroughly:\n\n"+task)
+
+	tr := newTraj(t)
+	tr.send("main1", "main", arr(u1), arr(taskCall))
+	tr.send("main2", "main", arr(u1, taskCall, taskOut), arr(call))
+	tr.instructions = "sub system"
+	tr.send("sub1", "sub", arr(subFirst), arr(a1))
+	tr.instructions = "sys"
+	tr.send("main3", "main", arr(u1, taskCall, taskOut, call, `{"type":"function_call_output","call_id":"call_1","output":"x"}`), arr(a2))
+	tr.instructions = "another sub system"
+	tr.send("late", "late", arr(subFirst), arr(a1))
+
+	tr.requireEdge("main2", "main1", EdgeContinue, "exact", 2)
+	tr.requireEdge("sub1", "main1", EdgeSubagent, "task_args", 0)
+	tr.requireEdge("late", "", EdgeRoot, "", 0)
+}
+
+// Claude Code 的子 agent 与父会话共用会话 id；并行派出的子 agent 互相不算“父会话往下走了”。
+func TestIndexSubagentSameSessionParallel(t *testing.T) {
+	user := func(text string) string { return fmt.Sprintf(`{"role":"user","content":%q}`, text) }
+	p1 := "Search the repository for every place that parses the config file and list the functions with file paths."
+	p2 := "Read the migration files under backend/migrations and summarize which tables each one creates or alters."
+	args := func(p string) string {
+		b, _ := json.Marshal(map[string]string{"description": "explore", "prompt": p})
+		return string(b)
+	}
+	calls := fmt.Sprintf(`{"type":"function_call","call_id":"t1","name":"Task","arguments":%q}`, args(p1)) + "," +
+		fmt.Sprintf(`{"type":"function_call","call_id":"t2","name":"Task","arguments":%q}`, args(p2))
+
+	tr := newTraj(t)
+	tr.send("main1", "cc", arr(u1), "["+calls+"]")
+	tr.instructions = "subagent system"
+	tr.send("subA", "cc", arr(user(p1)), arr(a1))
+	tr.send("subB", "cc", arr(user(p2)), arr(a2))
+
+	tr.requireEdge("subA", "main1", EdgeSubagent, "task_args", 0)
+	tr.requireEdge("subB", "main1", EdgeSubagent, "task_args", 0)
+	require.Equal(t, "t2", tr.row("subB").ParentCallID)
 }

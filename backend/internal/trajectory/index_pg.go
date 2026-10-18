@@ -197,6 +197,18 @@ func (s *pgIndexStore) setKind(ctx context.Context, exchangeID, kind string) err
 	return err
 }
 
+func (s *pgIndexStore) sessionBusyBetween(ctx context.Context, sessionID string, after, before time.Time, parentID string) (bool, error) {
+	var busy bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM trajectory_exchanges
+WHERE session_id = $1 AND started_at > $2 AND started_at < $3 AND exchange_id <> $4 AND kind NOT IN ('subagent', 'count_tokens')
+  AND NOT (parent_id IS NOT NULL AND parent_id = $4 AND edge IN ('continue', 'pointer')))`,
+		sessionID, after, before, parentID).Scan(&busy)
+	if err != nil {
+		return false, fmt.Errorf("check trajectory session activity: %w", err)
+	}
+	return busy, nil
+}
+
 func (s *pgIndexStore) startedBetween(ctx context.Context, userID int64, after, until time.Time, excludeID string) ([]ExchangeRow, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+exchangeColumns+` FROM trajectory_exchanges
 WHERE user_id = $1 AND started_at > $2 AND started_at <= $3 AND exchange_id <> $4 ORDER BY started_at`, userID, after, until, excludeID)

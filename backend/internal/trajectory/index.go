@@ -17,7 +17,7 @@ import (
 
 // IndexRulesVersion 串联 / 分类规则版本。改动 index*.go 或 ir/canon.go 的判定逻辑时 +1，
 // 启动后会自动清空索引并从 raw/ 全量重建。
-const IndexRulesVersion = 5
+const IndexRulesVersion = 7
 
 const (
 	EdgeRoot       = "root"
@@ -41,8 +41,11 @@ const (
 	// KindSubagent 子 agent 的 exchange（第一轮由 EdgeSubagent 判定，后续轮次从父节点继承）。
 	KindSubagent = "subagent"
 
-	spawnMinRunes        = 64
-	spawnHeadBytes       = 200
+	spawnMinRunes  = 64
+	spawnHeadBytes = 200
+	// spawnHeadMaxOffset 派出参数必须出现在某个用户文本块的开头附近（omp 前缀 "Complete assignment thoroughly: " 32 字节）；
+	// 压缩请求把整段对话塞进一条用户消息，里面的 tool_call 参数在很靠后的位置。
+	spawnHeadMaxOffset   = 128
 	spawnLookback        = 6 * time.Hour
 	spawnCandidatesLimit = 200
 
@@ -167,6 +170,9 @@ type indexStore interface {
 	updateLink(ctx context.Context, row *ExchangeRow) error
 	// spawnCandidates 同一用户 [since, before) 之间开始、带 spawn_calls 的 exchange，按开始时间倒序。
 	spawnCandidates(ctx context.Context, userID int64, since, before time.Time, excludeID string, limit int) ([]ExchangeRow, error)
+	// sessionBusyBetween 会话在 (after, before) 之间是否开始过别的 exchange。不计 parentID 本身、它的直接接续
+	// （continue / pointer 子节点）、子 agent 与 count_tokens。
+	sessionBusyBetween(ctx context.Context, sessionID string, after, before time.Time, parentID string) (bool, error)
 	// setSessionParent 记录子 agent 会话的父会话。
 	setSessionParent(ctx context.Context, sessionID, parentSessionID, parentExchangeID, parentCallID string) error
 	existingIDs(ctx context.Context, ids []string) (map[string]bool, error)
@@ -662,11 +668,22 @@ func (ix *Indexer) link(ctx context.Context, row *ExchangeRow, req *ir.Request, 
 	return nil
 }
 
-// linkSubagent 新根的开头用户消息包含之前某个 tool_call 的长字符串参数 → 该调用派出的子 agent。
+// linkSubagent 新根的开头用户消息以之前某个 tool_call 的长字符串参数开头 → 该调用派出的子 agent。
 // 只看用户消息，不看 system：主 agent 写进文件的长内容可能出现在后续会话的 system（规则文件）里。
+// 另外三个条件排除误判（design.md §6.5）：
+//   - 请求里没有 assistant 消息：刚派出的 agent 第一轮只有 system + 用户消息（排除前缀没接上的主线请求）；
+//   - 参数出现在用户文本块开头附近：压缩请求的对话转储里也有 tool_call 参数，但在很靠后的位置；
+//   - 在该 tool_call 的执行窗口内：父会话在父节点之后、本请求之前，除了父节点的直接接续没有发过别的请求
+//     （排除之后用同一段提示词另起的独立会话）。直接接续不算：omp 的 task 工具立即返回，父 agent 的下一轮
+//     可能比子 agent 第一轮早几十毫秒。子 agent 自己的请求也不算，Claude Code 的子 agent 与父会话同一个会话 id。
 func (ix *Indexer) linkSubagent(ctx context.Context, row *ExchangeRow, req *ir.Request) error {
-	text := normalizeSpace(leadingUserText(req, 2))
-	if len([]rune(text)) < spawnMinRunes {
+	for _, m := range req.Messages {
+		if m.Role == ir.RoleAssistant {
+			return nil
+		}
+	}
+	blocks := leadingUserBlocks(req, 2)
+	if len(blocks) == 0 {
 		return nil
 	}
 	cands, err := ix.store.spawnCandidates(ctx, row.UserID, row.StartedAt.Add(-spawnLookback), row.StartedAt, row.ExchangeID, spawnCandidatesLimit)
@@ -674,26 +691,45 @@ func (ix *Indexer) linkSubagent(ctx context.Context, row *ExchangeRow, req *ir.R
 		return err
 	}
 	for _, c := range cands {
-		for _, call := range c.SpawnCalls {
-			for _, head := range call.Heads {
-				if strings.Contains(text, head) {
-					id := c.ExchangeID
-					row.ParentID = &id
-					row.Edge, row.MatchLevel, row.PrefixMessages = EdgeSubagent, "task_args", 0
-					row.Kind = KindSubagent
-					row.ParentCallID = call.CallID
-					row.parentSessionID = c.SessionID
-					return nil
-				}
-			}
+		call, ok := matchSpawnCall(c.SpawnCalls, blocks)
+		if !ok {
+			continue
 		}
+		busy, err := ix.store.sessionBusyBetween(ctx, c.SessionID, c.StartedAt, row.StartedAt, c.ExchangeID)
+		if err != nil {
+			return err
+		}
+		if busy {
+			continue
+		}
+		id := c.ExchangeID
+		row.ParentID = &id
+		row.Edge, row.MatchLevel, row.PrefixMessages = EdgeSubagent, "task_args", 0
+		row.Kind = KindSubagent
+		row.ParentCallID = call.CallID
+		row.parentSessionID = c.SessionID
+		return nil
 	}
 	return nil
 }
 
-// leadingUserText 前 n 条消息中用户消息的文本。
-func leadingUserText(req *ir.Request, n int) string {
-	var parts []string
+// matchSpawnCall 找出开头附近包含其参数的那个 tool_call。
+func matchSpawnCall(calls []SpawnCall, blocks []string) (SpawnCall, bool) {
+	for _, call := range calls {
+		for _, head := range call.Heads {
+			for _, text := range blocks {
+				if i := strings.Index(text, head); i >= 0 && i <= spawnHeadMaxOffset {
+					return call, true
+				}
+			}
+		}
+	}
+	return SpawnCall{}, false
+}
+
+// leadingUserBlocks 前 n 条消息中用户消息的文本块（规范化空白，过短的不要）。
+func leadingUserBlocks(req *ir.Request, n int) []string {
+	var out []string
 	for i, m := range req.Messages {
 		if i >= n {
 			break
@@ -702,12 +738,15 @@ func leadingUserText(req *ir.Request, n int) string {
 			continue
 		}
 		for _, b := range m.Blocks {
-			if b.Type == ir.BlockText {
-				parts = append(parts, b.Text)
+			if b.Type != ir.BlockText {
+				continue
+			}
+			if text := normalizeSpace(b.Text); len([]rune(text)) >= spawnMinRunes {
+				out = append(out, text)
 			}
 		}
 	}
-	return strings.Join(parts, " ")
+	return out
 }
 
 // spawnCalls 收集响应中 tool_call 参数里足够长的字符串（规范化后取开头）。
