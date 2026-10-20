@@ -91,7 +91,11 @@ func (a *Attempt) observe(resp *http.Response, err error) (*http.Response, error
 
 func (a *Attempt) wrapBody(resp *http.Response) io.ReadCloser {
 	ex := a.ex
-	name := "upstream.resp" + responseExt(resp.Header.Get("Content-Type"))
+	accept := ""
+	if resp.Request != nil {
+		accept = resp.Request.Header.Get("Accept")
+	}
+	name := "upstream.resp" + responseExt(resp.Header.Get("Content-Type"), accept)
 	dataPath, timingPath := sinkPaths(a.dir, name)
 	tb := &teeBody{
 		rc:     resp.Body,

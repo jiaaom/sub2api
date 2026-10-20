@@ -218,7 +218,7 @@ func (ex *Exchange) captureClientResponse(p []byte, header http.Header) {
 		return
 	}
 	if ex.clientResp == nil {
-		ex.clientRespN = "client.resp" + responseExt(header.Get("Content-Type"))
+		ex.clientRespN = "client.resp" + responseExt(header.Get("Content-Type"), ex.meta.Client.Headers.Get("Accept"))
 		ex.clientResp = newAsyncSink(filepath.Join(ex.dir, ex.clientRespN), "", ex.rec.opts.MaxBodyBytes)
 	}
 	ex.clientResp.write(p, 0)

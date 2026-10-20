@@ -31,7 +31,7 @@ func summarizeExchange(dir string, m *Meta) {
 	if err != nil || len(body) == 0 {
 		return
 	}
-	s := parseResponseSummary(att.UpstreamProtocol, body, strings.HasSuffix(att.ResponseFile, ".sse"))
+	s := parseResponseSummary(att.UpstreamProtocol, body, isSSEFile(att.ResponseFile, body))
 	if s.model != "" {
 		m.Model.Upstream = s.model
 	}
@@ -267,5 +267,5 @@ func responseFileTerminal(dir, protocol, file string) bool {
 	if err != nil || len(body) == 0 {
 		return false
 	}
-	return parseResponseSummary(protocol, body, strings.HasSuffix(file, ".sse")).terminal
+	return parseResponseSummary(protocol, body, isSSEFile(file, body)).terminal
 }

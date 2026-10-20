@@ -3,9 +3,12 @@ package trajectory
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -308,8 +311,15 @@ func (b *errAfterBody) Close() error { return nil }
 
 // oh-my-pi 收到 response.completed 后立即断开：客户端 ctx 被取消、上游读报 context canceled，
 // 但 C/D 都已包含终止事件，数据完整，不应标为 incomplete。
+// "no content-type"：ChatGPT 的 Codex 后端返回 SSE 却不带 Content-Type，按请求的 Accept 落成 .sse。
 func TestMiddlewareClientDisconnectAfterTerminalEventIsComplete(t *testing.T) {
-	for name, partial := range map[string]bool{"after terminal": false, "before terminal": true} {
+	cases := map[string]struct{ partial, noContentType bool }{
+		"after terminal":  {},
+		"before terminal": {partial: true},
+		"no content-type": {noContentType: true},
+	}
+	for name, tc := range cases {
+		partial := tc.partial
 		t.Run(name, func(t *testing.T) {
 			rec := newTestRecorder(t, enabledScopes())
 			useDefault(t, rec)
@@ -317,15 +327,19 @@ func TestMiddlewareClientDisconnectAfterTerminalEventIsComplete(t *testing.T) {
 			if partial {
 				sent = upstreamSSE[:strings.Index(upstreamSSE, "event: response.completed")]
 			}
-			fake := &fakeUpstream{respond: func(*http.Request) (*http.Response, error) {
+			fake := &fakeUpstream{respond: func(r *http.Request) (*http.Response, error) {
 				h := http.Header{"Content-Type": {"text/event-stream"}}
-				return &http.Response{StatusCode: 200, Header: h, Body: &errAfterBody{r: strings.NewReader(sent), err: context.Canceled}}, nil
+				if tc.noContentType {
+					h = http.Header{}
+				}
+				return &http.Response{StatusCode: 200, Header: h, Body: &errAfterBody{r: strings.NewReader(sent), err: context.Canceled}, Request: r}, nil
 			}}
 			up := WrapHTTPUpstream(fake, rec)
 			ctx, cancel := context.WithCancel(context.Background())
 			handler := func(c *gin.Context) {
 				_, _ = io.ReadAll(c.Request.Body)
 				req, _ := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, "https://api.example.com/v1/responses", strings.NewReader(upstreamBody))
+				req.Header.Set("Accept", "text/event-stream")
 				resp, err := up.Do(req, "", 7, 1)
 				require.NoError(t, err)
 				defer func() { _ = resp.Body.Close() }()
@@ -354,6 +368,39 @@ func TestMiddlewareClientDisconnectAfterTerminalEventIsComplete(t *testing.T) {
 			require.NotNil(t, m.FinalAttempt)
 			require.Equal(t, "resp_1", m.ResponseID)
 			require.Len(t, m.Notes, 2)
+			require.Equal(t, "attempts/0/upstream.resp.sse", m.Attempts[0].ResponseFile)
 		})
 	}
+}
+
+// 修复前落成 .bin 的 SSE 响应：索引读 meta 时按内容认出 SSE，补判 closed_early 并补上 usage / response id（raw 不改）。
+func TestLoadMetaRepairsSSESavedAsBin(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "attempts", "0"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "attempts", "0", "upstream.resp.bin"), []byte(upstreamSSE), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "client.resp.sse"), []byte(upstreamSSE), 0o600))
+	raw := Meta{
+		ExchangeID: "x", Status: StatusError,
+		Client: ClientMeta{Protocol: ProtocolOpenAIResponses, Canceled: true, ResponseFile: "client.resp.sse"},
+		Attempts: []AttemptMeta{{
+			UpstreamProtocol: ProtocolOpenAIResponses, StatusCode: 200, Outcome: OutcomeError, Error: "context canceled",
+			ResponseFile: "attempts/0/upstream.resp.bin",
+		}},
+	}
+	data, err := json.Marshal(raw)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, fileMeta), data, 0o600))
+
+	m, err := loadMetaFile(dir)
+	require.NoError(t, err)
+	require.Equal(t, StatusComplete, m.Status)
+	require.Equal(t, OutcomeClosedEarly, m.Attempts[0].Outcome)
+	require.NotNil(t, m.FinalAttempt)
+	require.Equal(t, "resp_1", m.ResponseID)
+	require.NotNil(t, m.Usage)
+	require.EqualValues(t, 100, m.Usage.Input)
+
+	onDisk, err := os.ReadFile(filepath.Join(dir, fileMeta))
+	require.NoError(t, err)
+	require.Equal(t, data, onDisk, "raw meta stays untouched")
 }

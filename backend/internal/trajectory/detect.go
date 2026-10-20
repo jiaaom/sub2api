@@ -1,6 +1,7 @@
 package trajectory
 
 import (
+	"bytes"
 	"mime"
 	"net/http"
 	"net/url"
@@ -150,11 +151,14 @@ func bodyExt(contentType string, body []byte) string {
 	return ".bin"
 }
 
-// responseExt 响应 body 的文件扩展名。
-func responseExt(contentType string) string {
+// responseExt 响应 body 的文件扩展名。没有 Content-Type 时按请求的 Accept 推断：
+// ChatGPT 的 Codex 后端（chatgpt.com/backend-api/codex）返回 SSE 却不带 Content-Type。
+func responseExt(contentType, accept string) string {
 	mt := mediaType(contentType)
 	switch {
 	case mt == "text/event-stream":
+		return ".sse"
+	case mt == "" && strings.Contains(accept, "text/event-stream"):
 		return ".sse"
 	case strings.Contains(mt, "json"):
 		return ".json"
@@ -162,4 +166,22 @@ func responseExt(contentType string) string {
 		return ".txt"
 	}
 	return ".bin"
+}
+
+// isSSEFile 响应文件是否按 SSE 解析：.sse，或者内容本身就是 SSE 的 .bin（早期没有 Content-Type 时落成了 .bin）。
+func isSSEFile(file string, body []byte) bool {
+	if strings.HasSuffix(file, ".sse") {
+		return true
+	}
+	return strings.HasSuffix(file, ".bin") && looksLikeSSE(body)
+}
+
+func looksLikeSSE(body []byte) bool {
+	head := bytes.TrimLeft(body[:min(len(body), 64)], " \t\r\n")
+	for _, p := range []string{"event:", "data:", "id:", "retry:", ":"} {
+		if bytes.HasPrefix(head, []byte(p)) {
+			return true
+		}
+	}
+	return false
 }

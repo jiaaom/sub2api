@@ -17,7 +17,7 @@ import (
 
 // IndexRulesVersion 串联 / 分类规则版本。改动 index*.go 或 ir/canon.go 的判定逻辑时 +1，
 // 启动后会自动清空索引并从 raw/ 全量重建。
-const IndexRulesVersion = 7
+const IndexRulesVersion = 8
 
 const (
 	EdgeRoot       = "root"
@@ -393,7 +393,38 @@ func loadMetaFile(dir string) (*Meta, error) {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, err
 	}
+	repairMeta(dir, &m)
 	return &m, nil
+}
+
+// repairMeta 在内存里补救早期落定时的误判（raw 只追加不改）：SSE 响应没带 Content-Type 落成了 .bin，
+// 落定时认不出终止事件，客户端收完 response.completed 就断开导致的取消被记成 error。
+// 与落定时的规则一致：读到终止事件后才出错的 attempt 按 closed_early 处理。
+func repairMeta(dir string, m *Meta) {
+	if m.Status == StatusError && m.FinalAttempt == nil && !slices.Contains(m.Notes, "handler panicked") &&
+		(!m.Client.Canceled || responseFileTerminal(dir, m.Client.Protocol, m.Client.ResponseFile)) {
+		settleTerminalAttempts(dir, m)
+	}
+	// 落定时 .bin 没按 SSE 解析，usage / response id 都是空的
+	if att := summaryAttempt(m); m.Usage == nil && att != nil && strings.HasSuffix(att.ResponseFile, ".bin") {
+		summarizeExchange(dir, m)
+	}
+}
+
+func settleTerminalAttempts(dir string, m *Meta) {
+	for i := range m.Attempts {
+		att := &m.Attempts[i]
+		if (att.Outcome == OutcomeError || att.Outcome == OutcomeAborted) && !att.Truncated &&
+			responseFileTerminal(dir, att.UpstreamProtocol, att.ResponseFile) {
+			m.Notes = append(m.Notes, fmt.Sprintf("index: attempt %d: terminal event received before %s; treated as %s", i, att.Outcome, OutcomeClosedEarly))
+			att.Outcome = OutcomeClosedEarly
+			idx := i
+			m.FinalAttempt = &idx
+		}
+	}
+	if m.FinalAttempt != nil {
+		m.Status = StatusComplete
+	}
 }
 
 // parsedExchange 一个 exchange 解析后的 IR（最终 attempt 的 B / C）。
@@ -423,7 +454,7 @@ func parseExchange(dir string, meta *Meta) parsedExchange {
 	p.req, p.reqErr = ir.ParseRequest(att.UpstreamProtocol, body)
 	if att.ResponseFile != "" && att.StatusCode < 400 {
 		if body, err := os.ReadFile(filepath.Join(dir, att.ResponseFile)); err == nil {
-			p.resp, _ = ir.ParseResponse(att.UpstreamProtocol, body, strings.HasSuffix(att.ResponseFile, ".sse"))
+			p.resp, _ = ir.ParseResponse(att.UpstreamProtocol, body, isSSEFile(att.ResponseFile, body))
 		}
 	}
 	return p
