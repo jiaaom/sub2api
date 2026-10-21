@@ -174,6 +174,7 @@ client <─(D)─ [tee c.Writer]                                    <─(C)─ [
 **原地改写（rewrite）**：有些客户端不新开链，而是改写历史中间的消息，例如 Claude Code 把旧的 tool_result 替换为“已清除”占位、剥离旧 thinking、注入或替换 `<system-reminder>`。这会让前缀哈希在中间断开，如果不处理，就会被误判为 branch。处理方法：
 - 用 **tool_call id 作锚点**做对齐（id 在改写前后保持不变），对齐后逐条比较，记录哪些位置被改写、改成了什么，建立 `rewrite` 边。
 - 判定为 rewrite 的条件是：消息数和锚点序列一致，只有内容不同。否则仍然按 branch 处理。
+- 已实现的特例（索引规则 v9）：**末尾临时消息被替换**。请求以“父请求去掉最后一条 user 消息 + 父响应”为前缀时建立 `rewrite` 边（每个 exchange 按等级多存一组 `trim_*` 链尾哈希）。OpenClaw 每轮在末尾挂一条运行时上下文、下一轮删掉再追加新的。一般的中间改写（锚点对齐）仍未实现。
 
 **服务端上下文编辑（Anthropic `context_management`）**：上游会在服务端清除工具结果，**B 不等于模型实际看到的内容**。需要把请求里的 `context_management` 参数和响应里的 `applied_edits` 记入 meta，重建时再应用。这条要单独标注，因为它会影响 KV 重建的正确性。
 

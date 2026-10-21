@@ -17,7 +17,7 @@ import (
 
 // IndexRulesVersion 串联 / 分类规则版本。改动 index*.go 或 ir/canon.go 的判定逻辑时 +1，
 // 启动后会自动清空索引并从 raw/ 全量重建。
-const IndexRulesVersion = 8
+const IndexRulesVersion = 9
 
 const (
 	EdgeRoot       = "root"
@@ -32,6 +32,9 @@ const (
 	// EdgeSubagent 子 agent 的第一轮挂到派出它的那次 tool_call 所在的 exchange（parent_call_id 记录 call id）：
 	// 新根的第一条用户消息包含该 tool_call 的某个长字符串参数（omp task 的 tasks[].task、Claude Code Task 的 prompt）。
 	EdgeSubagent = "subagent"
+	// EdgeRewrite 父节点请求的最后一条（user）消息被替换：请求以“父请求去掉最后一条 + 父响应”为前缀。
+	// OpenClaw 每轮在末尾挂一条临时的运行时上下文，下一轮删掉它再追加新的。
+	EdgeRewrite = "rewrite"
 
 	KindMain              = "main"
 	KindCompactionRequest = "compaction_request"
@@ -85,14 +88,16 @@ type ExchangeRow struct {
 	RootHash           string     `json:"root_hash,omitempty"`
 	Req                [3]string  `json:"-"` // 按 ir.Levels 顺序
 	Head               [3]string  `json:"-"`
-	ReqMessages        int        `json:"req_messages"`
-	RespMessages       int        `json:"resp_messages"`
-	Tools              int        `json:"tools"`
-	ParentID           *string    `json:"parent_id"`
-	Edge               string     `json:"edge"`
-	MatchLevel         string     `json:"match_level,omitempty"`
-	PrefixMessages     int        `json:"prefix_messages"`
-	Kind               string     `json:"kind"`
+	// Trim 请求去掉最后一条 user 消息后接上响应的链尾（EdgeRewrite 用）；不适用时为空。
+	Trim           [3]string `json:"-"`
+	ReqMessages    int       `json:"req_messages"`
+	RespMessages   int       `json:"resp_messages"`
+	Tools          int       `json:"tools"`
+	ParentID       *string   `json:"parent_id"`
+	Edge           string    `json:"edge"`
+	MatchLevel     string    `json:"match_level,omitempty"`
+	PrefixMessages int       `json:"prefix_messages"`
+	Kind           string    `json:"kind"`
 	// ParentCallID 子 agent 的第一轮：派出它的 tool_call id。
 	ParentCallID string `json:"parent_call_id,omitempty"`
 	// SpawnCalls 响应里 tool_call 的长字符串参数开头（子 agent 匹配用）。
@@ -146,6 +151,7 @@ type linkCandidate struct {
 	StartedAt  time.Time
 	Req        string
 	Head       string
+	Trim       string
 	Kind       string
 }
 
@@ -154,7 +160,8 @@ type indexStore interface {
 	insertExchange(ctx context.Context, row *ExchangeRow) (bool, error)
 	upsertSession(ctx context.Context, row *ExchangeRow) error
 	findByResponseID(ctx context.Context, userID int64, responseID string) (*ExchangeRow, error)
-	findCandidates(ctx context.Context, userID int64, before time.Time, excludeID string, level int, hashes []string) ([]linkCandidate, error)
+	// findCandidates apiKeyID 非 0 时只在该 key 内找（没有会话标识的客户端按 key 隔离）。
+	findCandidates(ctx context.Context, userID, apiKeyID int64, before time.Time, excludeID string, level int, hashes []string) ([]linkCandidate, error)
 	// countChildren 不计 excludeID 自身（重新串联已入库的行时，它可能已经是该父节点的子节点）。
 	countChildren(ctx context.Context, parentID, edge, excludeID string) (int, error)
 	compactionCandidates(ctx context.Context, userID int64, sessionID string, since, before time.Time, limit int) ([]ExchangeRow, error)
@@ -474,6 +481,11 @@ func (ix *Indexer) indexOne(ctx context.Context, dir string, meta *Meta) error {
 		row.IndexError = p.reqErr.Error()
 	}
 	if p.req != nil {
+		if row.DetectedClient == "unknown" {
+			if c := detectClientFromText(leadingText(p.req, 2)); c != "" {
+				row.DetectedClient = c
+			}
+		}
 		if err := ix.link(ctx, row, p.req, p.resp); err != nil {
 			return err
 		}
@@ -679,6 +691,7 @@ func (ix *Indexer) link(ctx context.Context, row *ExchangeRow, req *ir.Request, 
 		chains[i] = ir.RequestChain(req, l)
 	}
 	ix.fillHashes(row, chains, respMsgs, len(req.Messages))
+	fillTrim(row, req, chains, respMsgs)
 
 	if err := ix.linkByPrefix(ctx, row, chains); err != nil {
 		return err
@@ -839,19 +852,48 @@ func (ix *Indexer) fillHashes(row *ExchangeRow, chains []ir.Chain, respMsgs []ir
 	}
 }
 
+// fillTrim 请求最后一条是 user 消息且有响应时，记下“去掉它再接上响应”的链尾（EdgeRewrite 的匹配目标）。
+func fillTrim(row *ExchangeRow, req *ir.Request, chains []ir.Chain, respMsgs []ir.Message) {
+	n := len(req.Messages)
+	if n == 0 || len(respMsgs) == 0 || req.Messages[n-1].Role != ir.RoleUser {
+		return
+	}
+	for i, l := range ir.Levels {
+		ch := chains[i]
+		k := len(ch.MsgIndex)
+		if k == 0 || ch.MsgIndex[k-1] != n-1 {
+			continue
+		}
+		base := ir.Chain{Hashes: ch.Hashes[:len(ch.Hashes)-1], MsgIndex: ch.MsgIndex[:k-1]}
+		row.Trim[i] = ir.Extend(base, respMsgs, n, l).Last()
+	}
+}
+
+// 命中候选的哪个链尾：响应链尾（continue）> 请求链尾（retry / branch）> 去掉最后一条再接响应（rewrite）。
+const (
+	viaTrim = iota
+	viaReq
+	viaHead
+)
+
 // linkByPrefix 在所有等级中找“链尾哈希出现在新请求链中且位置最靠后”的已有 exchange。
-// 位置相同时优先更严格的等级、命中响应链尾（continue）而非请求链尾、开始时间更晚者。
+// 位置相同时优先更严格的等级、命中的链尾种类（见 viaHead 等）、开始时间更晚者。
+// 没有会话标识的请求只在同一个 API key 内找，避免多个同类客户端（如多个 OpenClaw）互相串联。
 func (ix *Indexer) linkByPrefix(ctx context.Context, row *ExchangeRow, chains []ir.Chain) error {
 	type best struct {
 		cand  linkCandidate
 		level int
 		pos   int
-		head  bool
+		via   int
+	}
+	var keyID int64
+	if row.SessionHint == "" {
+		keyID = row.APIKeyID
 	}
 	var b *best
 	for li := range ir.Levels {
 		chain := chains[li]
-		cands, err := ix.store.findCandidates(ctx, row.UserID, row.StartedAt, row.ExchangeID, li, chain.Hashes)
+		cands, err := ix.store.findCandidates(ctx, row.UserID, keyID, row.StartedAt, row.ExchangeID, li, chain.Hashes)
 		if err != nil {
 			return err
 		}
@@ -860,25 +902,30 @@ func (ix *Indexer) linkByPrefix(ctx context.Context, row *ExchangeRow, chains []
 			pos[h] = i
 		}
 		for _, c := range cands {
-			for _, viaHead := range []bool{true, false} {
-				h := c.Req
-				if viaHead {
+			for _, via := range []int{viaHead, viaReq, viaTrim} {
+				var h string
+				switch via {
+				case viaHead:
 					// 没有响应（上游失败）时 head == req，按请求链尾处理，这样同样的重发会判为 retry 而不是 continue。
 					if c.Head == c.Req {
 						continue
 					}
 					h = c.Head
+				case viaReq:
+					h = c.Req
+				default:
+					h = c.Trim
 				}
 				p, ok := pos[h]
-				if !ok {
+				if h == "" || !ok {
 					continue
 				}
 				better := b == nil || p > b.pos ||
 					(p == b.pos && li < b.level) ||
-					(p == b.pos && li == b.level && viaHead && !b.head) ||
-					(p == b.pos && li == b.level && viaHead == b.head && c.StartedAt.After(b.cand.StartedAt))
+					(p == b.pos && li == b.level && via > b.via) ||
+					(p == b.pos && li == b.level && via == b.via && c.StartedAt.After(b.cand.StartedAt))
 				if better {
-					b = &best{cand: c, level: li, pos: p, head: viaHead}
+					b = &best{cand: c, level: li, pos: p, via: via}
 				}
 			}
 		}
@@ -897,7 +944,9 @@ func (ix *Indexer) linkByPrefix(ctx context.Context, row *ExchangeRow, chains []
 	}
 	last := len(chains[b.level].Hashes) - 1
 	switch {
-	case b.head:
+	case b.via == viaTrim:
+		row.Edge = EdgeRewrite
+	case b.via == viaHead:
 		n, err := ix.store.countChildren(ctx, parentID, EdgeContinue, row.ExchangeID)
 		if err != nil {
 			return err

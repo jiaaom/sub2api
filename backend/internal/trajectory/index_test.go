@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -70,16 +71,16 @@ func (m *memIndexStore) findByResponseID(_ context.Context, userID int64, id str
 	return nil, nil
 }
 
-func (m *memIndexStore) findCandidates(_ context.Context, userID int64, before time.Time, exclude string, level int, hashes []string) ([]linkCandidate, error) {
+func (m *memIndexStore) findCandidates(_ context.Context, userID, apiKeyID int64, before time.Time, exclude string, level int, hashes []string) ([]linkCandidate, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var out []linkCandidate
 	for _, r := range m.rows {
-		if r.UserID != userID || r.ExchangeID == exclude || r.StartedAt.After(before) {
+		if r.UserID != userID || r.ExchangeID == exclude || r.StartedAt.After(before) || (apiKeyID != 0 && r.APIKeyID != apiKeyID) {
 			continue
 		}
-		if slices.Contains(hashes, r.Req[level]) || slices.Contains(hashes, r.Head[level]) {
-			out = append(out, linkCandidate{ExchangeID: r.ExchangeID, SessionID: r.SessionID, StartedAt: r.StartedAt, Req: r.Req[level], Head: r.Head[level], Kind: r.Kind})
+		if slices.Contains(hashes, r.Req[level]) || slices.Contains(hashes, r.Head[level]) || (r.Trim[level] != "" && slices.Contains(hashes, r.Trim[level])) {
+			out = append(out, linkCandidate{ExchangeID: r.ExchangeID, SessionID: r.SessionID, StartedAt: r.StartedAt, Req: r.Req[level], Head: r.Head[level], Trim: r.Trim[level], Kind: r.Kind})
 		}
 	}
 	return out, nil
@@ -274,6 +275,17 @@ type traj struct {
 	clock  time.Time
 	// instructions 请求的 system（Responses instructions），默认 "sys"。
 	instructions string
+	up           service.HTTPUpstream
+	handler      gin.HandlerFunc
+	// userAgent 默认 omp。
+	userAgent string
+}
+
+// useKey 之后的请求改用另一个 API key。
+func (tr *traj) useKey(id int64) {
+	key := testAPIKey()
+	key.ID = id
+	tr.engine = newGatewayEngine(tr.rec, tr.up, key, tr.handler)
 }
 
 func newTraj(t *testing.T) *traj {
@@ -305,6 +317,7 @@ func newTraj(t *testing.T) *traj {
 		c.Status(resp.StatusCode)
 		_, _ = io.Copy(c.Writer, resp.Body)
 	}
+	tr.up, tr.handler = up, handler
 	tr.engine = newGatewayEngine(rec, up, testAPIKey(), handler)
 	return tr
 }
@@ -318,7 +331,11 @@ func (tr *traj) send(tag, hint, input, output string, extra ...string) {
 	sse := fmt.Sprintf("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_%s\",\"object\":\"response\",\"status\":\"completed\",\"output\":%s}}\n\n", tag, output)
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "Oh-My-Pi/18")
+	ua := tr.userAgent
+	if ua == "" {
+		ua = "Oh-My-Pi/18"
+	}
+	req.Header.Set("User-Agent", ua)
 	if output == "502" {
 		sse = "502"
 	}
@@ -694,4 +711,37 @@ func TestIndexSubagentSameSessionParallel(t *testing.T) {
 	tr.requireEdge("subA", "main1", EdgeSubagent, "task_args", 0)
 	tr.requireEdge("subB", "main1", EdgeSubagent, "task_args", 0)
 	require.Equal(t, "t2", tr.row("subB").ParentCallID)
+}
+
+// OpenClaw（实录 2026-10-21）：回传 tool_call 时去掉 call id 里的下划线；每轮末尾挂一条临时的运行时上下文，
+// 下一轮删掉它再追加新的；不发会话标识。
+func TestIndexOpenClawRewritesAndKeyIsolation(t *testing.T) {
+	user := func(text string) string { return fmt.Sprintf(`{"role":"user","content":%q}`, text) }
+	fc := func(id string) string {
+		return fmt.Sprintf(`{"type":"function_call","call_id":%q,"name":"exec","arguments":"{\"command\": \"ls\"}"}`, id)
+	}
+	out := func(id string) string {
+		return fmt.Sprintf(`{"type":"function_call_output","call_id":%q,"output":"a b c"}`, id)
+	}
+	sys := `{"role":"system","content":"<!-- openclaw:attempt:STABLE -->\nYou are a personal assistant running inside OpenClaw."}`
+	ctx := func(n int) string { return user(fmt.Sprintf("OpenClaw runtime context: turn %d", n)) }
+
+	tr := newTraj(t)
+	tr.userAgent = "OpenAI/JS 7.27.0"
+	tr.send("t1", "", arr(sys, u1), arr(fc("call_00_aa")))
+	// 1) 只改写了 call id：loose 等级接续
+	tr.send("t2", "", arr(sys, u1, fc("call00aa"), out("call00aa")), arr(fc("call_00_bb")))
+	// 2) 末尾临时上下文被替换：rewrite
+	tr.send("t3", "", arr(sys, u1, fc("call00aa"), out("call00aa"), fc("call00bb"), out("call00bb"), ctx(3)), arr(fc("call_00_cc")))
+	tr.send("t4", "", arr(sys, u1, fc("call00aa"), out("call00aa"), fc("call00bb"), out("call00bb"), fc("call00cc"), out("call00cc"), ctx(4)), arr(a1))
+	// 3) 另一个 key 上一模一样的对话：不串到第一个 key 上
+	tr.useKey(testKeyID + 1)
+	tr.send("k2", "", arr(sys, u1, fc("call00aa"), out("call00aa")), arr(a2))
+
+	tr.requireEdge("t2", "t1", EdgeContinue, "loose", 3)
+	tr.requireEdge("t3", "t2", EdgeContinue, "loose", 5)
+	tr.requireEdge("t4", "t3", EdgeRewrite, "loose", 7)
+	tr.requireEdge("k2", "", EdgeRoot, "", 0)
+	require.Equal(t, "openclaw", tr.row("t1").DetectedClient)
+	require.Equal(t, tr.row("t1").SessionID, tr.row("t4").SessionID, "the rewritten turns stay in one session")
 }

@@ -19,13 +19,14 @@ type pgIndexStore struct {
 
 var reqColumns = [3]string{"req_exact", "req_nothink", "req_loose"}
 var headColumns = [3]string{"head_exact", "head_nothink", "head_loose"}
+var trimColumns = [3]string{"trim_exact", "trim_nothink", "trim_loose"}
 
 const exchangeColumns = `exchange_id, raw_path, started_at, finished_at, user_id, api_key_id, group_id, status, status_code,
 client_path, client_protocol, upstream_protocol, detected_client, model, session_id, session_hint,
 input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
 response_id, previous_response_id, root_hash, req_exact, req_nothink, req_loose, head_exact, head_nothink, head_loose,
 req_messages, resp_messages, tools, parent_id, edge, match_level, prefix_messages, kind,
-resp_text_head, resp_text_len, title, index_error, spawn_calls, parent_call_id`
+resp_text_head, resp_text_len, title, index_error, spawn_calls, parent_call_id, trim_exact, trim_nothink, trim_loose`
 
 func scanExchange(sc interface{ Scan(...any) error }) (*ExchangeRow, error) {
 	var r ExchangeRow
@@ -36,7 +37,7 @@ func scanExchange(sc interface{ Scan(...any) error }) (*ExchangeRow, error) {
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheWriteTokens, &r.ReasoningTokens,
 		&r.ResponseID, &r.PreviousResponseID, &r.RootHash, &r.Req[0], &r.Req[1], &r.Req[2], &r.Head[0], &r.Head[1], &r.Head[2],
 		&r.ReqMessages, &r.RespMessages, &r.Tools, &parent, &r.Edge, &r.MatchLevel, &r.PrefixMessages, &r.Kind,
-		&r.RespTextHead, &r.RespTextLen, &r.Title, &r.IndexError, &spawn, &r.ParentCallID)
+		&r.RespTextHead, &r.RespTextLen, &r.Title, &r.IndexError, &spawn, &r.ParentCallID, &r.Trim[0], &r.Trim[1], &r.Trim[2])
 	if err != nil {
 		return nil, err
 	}
@@ -56,14 +57,14 @@ func scanExchange(sc interface{ Scan(...any) error }) (*ExchangeRow, error) {
 
 func (s *pgIndexStore) insertExchange(ctx context.Context, r *ExchangeRow) (bool, error) {
 	res, err := s.db.ExecContext(ctx, `INSERT INTO trajectory_exchanges (`+exchangeColumns+`, rules_version)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48)
 ON CONFLICT (exchange_id) DO NOTHING`,
 		r.ExchangeID, r.RawPath, r.StartedAt, r.FinishedAt, r.UserID, r.APIKeyID, r.GroupID, r.Status, r.StatusCode,
 		r.ClientPath, r.ClientProtocol, r.UpstreamProtocol, r.DetectedClient, r.Model, r.SessionID, r.SessionHint,
 		r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheWriteTokens, r.ReasoningTokens,
 		r.ResponseID, r.PreviousResponseID, r.RootHash, r.Req[0], r.Req[1], r.Req[2], r.Head[0], r.Head[1], r.Head[2],
 		r.ReqMessages, r.RespMessages, r.Tools, r.ParentID, r.Edge, r.MatchLevel, r.PrefixMessages, r.Kind,
-		r.RespTextHead, r.RespTextLen, r.Title, r.IndexError, spawnJSON(r.SpawnCalls), r.ParentCallID, IndexRulesVersion)
+		r.RespTextHead, r.RespTextLen, r.Title, r.IndexError, spawnJSON(r.SpawnCalls), r.ParentCallID, r.Trim[0], r.Trim[1], r.Trim[2], IndexRulesVersion)
 	if err != nil {
 		return false, fmt.Errorf("insert trajectory exchange: %w", err)
 	}
@@ -142,11 +143,12 @@ WHERE user_id = $1 AND response_id = $2 ORDER BY started_at DESC LIMIT 1`, userI
 	return r, err
 }
 
-func (s *pgIndexStore) findCandidates(ctx context.Context, userID int64, before time.Time, excludeID string, level int, hashes []string) ([]linkCandidate, error) {
-	q := fmt.Sprintf(`SELECT exchange_id, session_id, started_at, %[1]s, %[2]s, kind FROM trajectory_exchanges
-WHERE user_id = $1 AND started_at <= $2 AND exchange_id <> $3 AND (%[1]s = ANY($4) OR %[2]s = ANY($4))`,
-		reqColumns[level], headColumns[level])
-	rows, err := s.db.QueryContext(ctx, q, userID, before, excludeID, pq.Array(hashes))
+func (s *pgIndexStore) findCandidates(ctx context.Context, userID, apiKeyID int64, before time.Time, excludeID string, level int, hashes []string) ([]linkCandidate, error) {
+	q := fmt.Sprintf(`SELECT exchange_id, session_id, started_at, %[1]s, %[2]s, %[3]s, kind FROM trajectory_exchanges
+WHERE user_id = $1 AND started_at <= $2 AND exchange_id <> $3 AND (%[1]s = ANY($4) OR %[2]s = ANY($4) OR %[3]s = ANY($4))
+  AND ($5 = 0 OR api_key_id = $5)`,
+		reqColumns[level], headColumns[level], trimColumns[level])
+	rows, err := s.db.QueryContext(ctx, q, userID, before, excludeID, pq.Array(hashes), apiKeyID)
 	if err != nil {
 		return nil, fmt.Errorf("find trajectory link candidates: %w", err)
 	}
@@ -154,7 +156,7 @@ WHERE user_id = $1 AND started_at <= $2 AND exchange_id <> $3 AND (%[1]s = ANY($
 	var out []linkCandidate
 	for rows.Next() {
 		var c linkCandidate
-		if err := rows.Scan(&c.ExchangeID, &c.SessionID, &c.StartedAt, &c.Req, &c.Head, &c.Kind); err != nil {
+		if err := rows.Scan(&c.ExchangeID, &c.SessionID, &c.StartedAt, &c.Req, &c.Head, &c.Trim, &c.Kind); err != nil {
 			return nil, err
 		}
 		out = append(out, c)

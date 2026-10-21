@@ -66,6 +66,24 @@ var clientRules = []struct {
 	{"cursor", func(ua string, _ http.Header) bool { return strings.Contains(ua, "cursor") }},
 }
 
+// clientBodyMarkers User-Agent 认不出的客户端，按请求内容里的特征串识别（OpenClaw 用通用的 OpenAI/JS SDK，
+// 但 system prompt 里带 <!-- openclaw:attempt:STABLE -->）。
+var clientBodyMarkers = []struct{ name, marker string }{
+	{"openclaw", "openclaw:attempt"},
+}
+
+// detectClientFromText 在请求文本里找客户端特征串，找不到返回 ""。
+func detectClientFromText(texts ...string) string {
+	for _, m := range clientBodyMarkers {
+		for _, t := range texts {
+			if strings.Contains(t, m.marker) {
+				return m.name
+			}
+		}
+	}
+	return ""
+}
+
 func detectClient(h http.Header) string {
 	ua := strings.ToLower(h.Get("User-Agent"))
 	for _, rule := range clientRules {

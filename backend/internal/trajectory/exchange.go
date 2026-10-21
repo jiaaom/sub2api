@@ -358,6 +358,11 @@ func (ex *Exchange) finalize() {
 
 	m.Client.Stream = requestWantsStream(m.Client.Protocol, m.Client.Path, m.Client.Query, ex.clientReq)
 	m.Client.SessionHint = detectSessionHint(m.Client.Headers, ex.clientReq)
+	if m.Client.DetectedClient == "unknown" {
+		if c := detectClientFromText(string(ex.clientReq)); c != "" {
+			m.Client.DetectedClient = c
+		}
+	}
 	m.Model.Requested = requestedModel(m.Client.Protocol, m.Client.Path, ex.clientReq)
 	summarizeExchange(ex.dir, m)
 	rel, err := ex.rec.store.commit(ex.dir, m)

@@ -120,6 +120,7 @@ export default {
         continue: 'continues #{n}',
         branch: 'branches from #{n}',
         retry: 'retry of #{n}',
+        rewrite: 'continues #{n} (tail rewritten)',
         pointer: 'previous_response_id → #{n}',
         compaction: 'summary of #{n}',
         summarize: 'summarizes #{n}',

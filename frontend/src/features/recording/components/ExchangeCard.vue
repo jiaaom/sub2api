@@ -179,6 +179,7 @@ const edgeClass = computed(() => {
   switch (props.row.edge) {
     case 'continue':
     case 'pointer':
+    case 'rewrite':
       return 'bg-primary-50 text-primary-700 dark:bg-primary-950/40 dark:text-primary-300'
     case 'branch':
       return 'bg-fuchsia-50 text-fuchsia-700 dark:bg-fuchsia-950/40 dark:text-fuchsia-300'

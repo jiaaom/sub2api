@@ -18,7 +18,7 @@ const (
 	// LevelNoThinking 在 Exact 基础上去掉 thinking / redacted / encrypted 块（客户端常不回传 CoT）。
 	// 去掉后为空的消息（例如 Responses 单独的 reasoning item）整条跳过。
 	LevelNoThinking
-	// LevelLoose 只比较角色、文本和 tool_call 的 (id, name)。
+	// LevelLoose 只比较角色、文本和 tool_call 的 (id, name)；id 只保留字母数字（OpenClaw 回传时会去掉 call_00_x 里的下划线）。
 	LevelLoose
 )
 
@@ -153,14 +153,13 @@ func canonBlock(b Block, level Level) map[string]any {
 		}
 		return map[string]any{"t": b.Type} // 密文不参与哈希
 	case BlockToolCall:
-		c := map[string]any{"t": BlockToolCall, "id": b.ID, "n": b.Name}
-		if level != LevelLoose {
-			c["a"] = canonArgs(b)
+		if level == LevelLoose {
+			return map[string]any{"t": BlockToolCall, "id": looseID(b.ID), "n": b.Name}
 		}
-		return c
+		return map[string]any{"t": BlockToolCall, "id": b.ID, "n": b.Name, "a": canonArgs(b)}
 	case BlockToolResult:
 		if level == LevelLoose {
-			return map[string]any{"t": BlockToolResult, "id": b.CallID}
+			return map[string]any{"t": BlockToolResult, "id": looseID(b.CallID)}
 		}
 		return map[string]any{"t": BlockToolResult, "id": b.CallID, "e": b.IsError, "c": canonBlockList(b.Content, level)}
 	case BlockImage:
@@ -219,4 +218,14 @@ func canonTools(tools []Tool) []map[string]any {
 		out = append(out, map[string]any{"n": t.Name, "d": strings.TrimSpace(t.Description), "s": canonJSON(t.Schema)})
 	}
 	return out
+}
+
+// looseID tool call id 只保留 ASCII 字母数字。
+func looseID(id string) string {
+	return strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		return -1
+	}, id)
 }

@@ -120,6 +120,7 @@ export default {
         continue: '接续 #{n}',
         branch: '从 #{n} 分叉',
         retry: '重试 #{n}',
+        rewrite: '改写后接续 #{n}',
         pointer: 'previous_response_id → #{n}',
         compaction: '#{n} 的摘要',
         summarize: '总结 #{n}',
